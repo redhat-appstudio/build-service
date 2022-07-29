@@ -17,17 +17,23 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"flag"
+	"fmt"
 	"os"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	apiextensionsclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/selection"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/wait"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -72,6 +78,23 @@ func main() {
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	// we have seen in e2e testing that this path can get invoked prior to the Tekton CRD getting generated,
+	// and controller-runtime does not retry on missing CRDs.
+	// so we are going to wait on a Tekton CRDs existing before moving forward.
+	apiextensionsClient := apiextensionsclient.NewForConfigOrDie(ctrl.GetConfigOrDie())
+	if err := wait.PollImmediate(time.Second*5, time.Minute*5, func() (done bool, err error) {
+		_, err = apiextensionsClient.ApiextensionsV1().CustomResourceDefinitions().Get(context.TODO(), "taskruns.tekton.dev", metav1.GetOptions{})
+		if err != nil {
+			setupLog.Info(fmt.Sprintf("get of taskrun CRD failed with: %s", err.Error()))
+			return false, nil
+		}
+		setupLog.Info("get of taskrun CRD returned successfully")
+		return true, nil
+	}); err != nil {
+		setupLog.Error(err, "timed out waiting for taskrun CRD to be created")
+		os.Exit(1)
+	}
 
 	if err := triggersapi.AddToScheme(scheme); err != nil {
 		setupLog.Error(err, "unable to add triggers api to the scheme")

@@ -117,8 +117,6 @@ const (
 	EFailedToParseImageAnnotation BOErrorId = 200
 	// The secret with git credentials specified in component.Spec.Secret does not exist in the user's namespace.
 	EComponentGitSecretMissing BOErrorId = 201
-	// The secret with image registry credentials specified in 'image.redhat.com/image' annotation does not exist in the user's namespace.
-	EComponentImageRegistrySecretMissing BOErrorId = 202
 )
 
 var boErrorMessages = map[BOErrorId]string{
@@ -142,7 +140,6 @@ var boErrorMessages = map[BOErrorId]string{
 	EGitLabTokenInsufficientScope: "GitLab access token does not have enough scope",
 	EGitLabTokenUnauthorized:      "Access token is unrecognizable by remote GitLab service",
 
-	EFailedToParseImageAnnotation:        "Failed to parse image.redhat.com/image annotation value",
-	EComponentGitSecretMissing:           "Specified secret with git credential not found",
-	EComponentImageRegistrySecretMissing: "Component image repository secret not found",
+	EFailedToParseImageAnnotation: "Failed to parse image.redhat.com/image annotation value",
+	EComponentGitSecretMissing:    "Specified secret with git credential not found",
 }

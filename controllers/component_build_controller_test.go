@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/yaml"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -89,6 +90,24 @@ var _ = Describe("Component initial build controller", func() {
 		namespacePaCSecretKey = types.NamespacedName{Name: gitopsprepare.PipelinesAsCodeSecretName, Namespace: HASAppNamespace}
 		webhookSecretKey      = types.NamespacedName{Name: gitops.PipelinesAsCodeWebhooksSecretName, Namespace: HASAppNamespace}
 	)
+
+	Context("Component migration", func() {
+		It("should delete outdated ImageRegistrySecretLinkFinalizer finalizer from existing component", func() {
+			component := getComponentData(componentConfig{})
+			component.ObjectMeta.Finalizers = []string{
+				ImageRegistrySecretLinkFinalizer,
+			}
+			Expect(controllerutil.ContainsFinalizer(component, ImageRegistrySecretLinkFinalizer)).To(BeTrue())
+			Expect(k8sClient.Create(ctx, component)).To(Succeed())
+
+			Eventually(func() bool {
+				component = getComponent(resourceKey)
+				return !controllerutil.ContainsFinalizer(component, ImageRegistrySecretLinkFinalizer)
+			}, timeout, interval).Should(BeTrue())
+
+			deleteComponent(resourceKey)
+		})
+	})
 
 	Context("Test Pipelines as Code build preparation", func() {
 
@@ -561,6 +580,16 @@ var _ = Describe("Component initial build controller", func() {
 			ensureComponentInitialBuildAnnotationState(resourceKey, false)
 		})
 
+		It("should do nothing if the component image is not defined in spec nor annotation", func() {
+			deleteComponent(resourceKey)
+			component := getComponentData(componentConfig{})
+			component.Spec.ContainerImage = ""
+			Expect(k8sClient.Create(ctx, component)).To(Succeed())
+			setComponentDevfileModel(resourceKey)
+
+			ensureComponentInitialBuildAnnotationState(resourceKey, false)
+		})
+
 		It("should do nothing if initial build annotation is already set", func() {
 			github.CreatePaCPullRequest = func(c *github.GithubClient, d *github.PaCPullRequestData) (string, error) {
 				defer GinkgoRecover()
@@ -643,87 +672,6 @@ var _ = Describe("Component initial build controller", func() {
 			Eventually(func() bool {
 				return isCreatePaCPullRequestInvoked
 			}, timeout, interval).Should(BeTrue())
-		})
-
-		It("should link auto generated image repository secret to pipeline service accoount", func() {
-			deleteComponent(resourceKey)
-
-			userImageRepo := "docker.io/user/image"
-			generatedImageRepo := "quay.io/appstudio/generated-image"
-			generatedImageRepoSecretName := "generated-image-repo-secret"
-			generatedImageRepoSecretKey := types.NamespacedName{Namespace: resourceKey.Namespace, Name: generatedImageRepoSecretName}
-			pipelineSAKey := types.NamespacedName{Namespace: resourceKey.Namespace, Name: buildPipelineServiceAccountName}
-
-			checkPROutputImage := func(fileContent []byte, expectedImageRepo string) {
-				var prYaml v1beta1.PipelineRun
-				Expect(yaml.Unmarshal(fileContent, &prYaml)).To(Succeed())
-				outoutImage := ""
-				for _, param := range prYaml.Spec.Params {
-					if param.Name == "output-image" {
-						outoutImage = param.Value.StringVal
-						break
-					}
-				}
-				Expect(outoutImage).ToNot(BeEmpty())
-				Expect(outoutImage).To(ContainSubstring(expectedImageRepo))
-			}
-
-			isCreatePaCPullRequestInvoked := false
-			github.CreatePaCPullRequest = func(c *github.GithubClient, d *github.PaCPullRequestData) (string, error) {
-				defer GinkgoRecover()
-				checkPROutputImage(d.Files[0].Content, userImageRepo)
-				isCreatePaCPullRequestInvoked = true
-				return "url", nil
-			}
-
-			// Create a component with user's ContainerImage
-			component := getSampleComponentData(resourceKey)
-			component.Spec.ContainerImage = userImageRepo
-			createComponentForPaCBuild(component)
-			setComponentDevfileModel(resourceKey)
-
-			Eventually(func() bool {
-				return isCreatePaCPullRequestInvoked
-			}, timeout, interval).Should(BeTrue())
-
-			createSecret(generatedImageRepoSecretKey, nil)
-			defer deleteSecret(generatedImageRepoSecretKey)
-
-			// Switch to generated image repository
-
-			isCreatePaCPullRequestInvoked = false
-			github.CreatePaCPullRequest = func(c *github.GithubClient, d *github.PaCPullRequestData) (string, error) {
-				defer GinkgoRecover()
-				checkPROutputImage(d.Files[0].Content, generatedImageRepo)
-				isCreatePaCPullRequestInvoked = true
-				return "url2", nil
-			}
-
-			component = getComponent(resourceKey)
-			component.Annotations[ImageRepoGenerateAnnotationName] = "false"
-			component.Annotations[ImageRepoAnnotationName] =
-				fmt.Sprintf("{\"image\":\"%s\",\"secret\":\"%s\"}", generatedImageRepo, generatedImageRepoSecretName)
-			component.Spec.ContainerImage = generatedImageRepo
-			Expect(k8sClient.Update(ctx, component)).To(Succeed())
-
-			Eventually(func() bool {
-				component = getComponent(resourceKey)
-				return component.Spec.ContainerImage == generatedImageRepo
-			}, timeout, interval).Should(BeTrue())
-			Eventually(func() bool {
-				return isCreatePaCPullRequestInvoked
-			}, timeout, interval).Should(BeTrue())
-
-			pipelineSA := &corev1.ServiceAccount{}
-			Expect(k8sClient.Get(ctx, pipelineSAKey, pipelineSA)).To(Succeed())
-			isImageRegistryGeneratedSecretLinked := false
-			for _, secret := range pipelineSA.Secrets {
-				if secret.Name == generatedImageRepoSecretName {
-					isImageRegistryGeneratedSecretLinked = true
-					break
-				}
-			}
-			Expect(isImageRegistryGeneratedSecretLinked).To(BeTrue())
 		})
 	})
 

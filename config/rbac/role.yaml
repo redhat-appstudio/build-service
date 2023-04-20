@@ -17,7 +17,6 @@ rules:
   resources:
   - serviceaccounts
   verbs:
-  - create
   - get
   - list
   - patch
@@ -54,14 +53,6 @@ rules:
   - appstudio.redhat.com
   resources:
   - components/status
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - ""
-  resources:
-  - configmaps
   verbs:
   - get
   - list

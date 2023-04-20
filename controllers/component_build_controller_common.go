@@ -32,7 +32,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
 
@@ -76,30 +75,6 @@ func (r *ComponentBuildReconciler) GetPipelineForComponent(ctx context.Context, 
 		Name:   defaultPipelineName,
 		Bundle: defaultPipelineBundle,
 	}, nil, nil
-}
-
-func (r *ComponentBuildReconciler) ensurePipelineServiceAccount(ctx context.Context, namespace string) (*corev1.ServiceAccount, error) {
-	pipelinesServiceAccount := &corev1.ServiceAccount{}
-	err := r.Client.Get(ctx, types.NamespacedName{Name: buildPipelineServiceAccountName, Namespace: namespace}, pipelinesServiceAccount)
-	if err != nil {
-		if !errors.IsNotFound(err) {
-			r.Log.Error(err, fmt.Sprintf("Failed to read service account %s in namespace %s", buildPipelineServiceAccountName, namespace))
-			return nil, err
-		}
-		// Create service account for the build pipeline
-		buildPipelineSA := corev1.ServiceAccount{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      buildPipelineServiceAccountName,
-				Namespace: namespace,
-			},
-		}
-		if err := r.Client.Create(ctx, &buildPipelineSA); err != nil {
-			r.Log.Error(err, fmt.Sprintf("Failed to create service account %s in namespace %s", buildPipelineServiceAccountName, namespace))
-			return nil, err
-		}
-		return r.ensurePipelineServiceAccount(ctx, namespace)
-	}
-	return pipelinesServiceAccount, nil
 }
 
 func (r *ComponentBuildReconciler) linkSecretToServiceAccount(ctx context.Context, secretName, serviceAccountName, namespace string, isPullSecret bool) (bool, error) {
@@ -161,57 +136,6 @@ func (r *ComponentBuildReconciler) linkSecretToServiceAccount(ctx context.Contex
 		return true, nil
 	}
 	return false, nil
-}
-
-// unlinkSecretFromServiceAccount ensures that the given secret is not linked with the provided service account.
-// Returns true if the secret was unlinked, false if the link didn't exist.
-func (r *ComponentBuildReconciler) unlinkSecretFromServiceAccount(ctx context.Context, secretNameToRemove, serviceAccountName, namespace string) (bool, error) {
-	serviceAccount := &corev1.ServiceAccount{}
-	err := r.Client.Get(ctx, types.NamespacedName{Name: serviceAccountName, Namespace: namespace}, serviceAccount)
-	if err != nil {
-		if errors.IsNotFound(err) {
-			return false, nil
-		}
-		r.Log.Error(err, fmt.Sprintf("Failed to read service account %s in namespace %s", serviceAccountName, namespace))
-		return false, err
-	}
-
-	isSecretUnlinked := false
-	// Remove secret from secrets list
-	for index, credentialSecret := range serviceAccount.Secrets {
-		if credentialSecret.Name == secretNameToRemove {
-			secrets := make([]corev1.ObjectReference, 0, len(serviceAccount.Secrets))
-			if len(serviceAccount.Secrets) != 1 {
-				secrets = append(secrets, serviceAccount.Secrets[:index]...)
-				secrets = append(secrets, serviceAccount.Secrets[index+1:]...)
-			}
-			serviceAccount.Secrets = secrets
-			isSecretUnlinked = true
-			break
-		}
-	}
-	// Remove secret from pull secrets list
-	for index, pullSecret := range serviceAccount.ImagePullSecrets {
-		if pullSecret.Name == secretNameToRemove {
-			secrets := make([]corev1.LocalObjectReference, 0, len(serviceAccount.ImagePullSecrets))
-			if len(serviceAccount.Secrets) != 1 {
-				secrets = append(secrets, serviceAccount.ImagePullSecrets[:index]...)
-				secrets = append(secrets, serviceAccount.ImagePullSecrets[index+1:]...)
-			}
-			serviceAccount.ImagePullSecrets = secrets
-			isSecretUnlinked = true
-			break
-		}
-	}
-
-	if isSecretUnlinked {
-		if err := r.Client.Update(ctx, serviceAccount); err != nil {
-			r.Log.Error(err, fmt.Sprintf("Unable to update pipeline service account %v", serviceAccount))
-			return false, err
-		}
-		r.Log.Info(fmt.Sprintf("Removed %s secret link from %s service account", secretNameToRemove, serviceAccount.Name))
-	}
-	return isSecretUnlinked, nil
 }
 
 func getContainerImageRepositoryForComponent(component *appstudiov1alpha1.Component) string {

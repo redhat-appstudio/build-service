@@ -83,7 +83,7 @@ func isOwnedBy(resource []metav1.OwnerReference, component appstudiov1alpha1.Com
 }
 
 func getMinimalDevfile() string {
-	return `        
+	return `
         schemaVersion: 2.2.0
         metadata:
             name: minimal-devfile
@@ -202,7 +202,9 @@ func deleteComponent(componentKey types.NamespacedName) {
 func setComponentDevfile(componentKey types.NamespacedName, devfile string) {
 	component := &appstudiov1alpha1.Component{}
 	Eventually(func() error {
-		Expect(k8sClient.Get(ctx, componentKey, component)).To(Succeed())
+		if err := k8sClient.Get(ctx, componentKey, component); err != nil {
+			return err
+		}
 		component.Status.Devfile = devfile
 		return k8sClient.Status().Update(ctx, component)
 	}, timeout, interval).Should(Succeed())

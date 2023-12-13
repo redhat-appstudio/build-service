@@ -17,6 +17,8 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"encoding/json"
+	"fmt"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	tektonapi "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1"
@@ -81,7 +83,7 @@ type PipelineSelector struct {
 
 	// Build Pipeline to use if the selector conditions are met.
 	// +kubebuilder:validation:Required
-	PipelineRef tektonapi.PipelineRef `json:"pipelineRef"`
+	PipelineRef PipelineRef `json:"pipelineRef"`
 
 	// Extra arguments to add to the specified pipeline run.
 	// +kubebuilder:validation:Optional
@@ -93,6 +95,161 @@ type PipelineSelector struct {
 	// If the section is omitted, then the condition is considered true (usually used for fallback condition).
 	// +kubebuilder:validation:Optional
 	WhenConditions WhenCondition `json:"when,omitempty"`
+}
+
+// PipelineRef can be used to refer to a specific instance of a Pipeline.
+type PipelineRef struct {
+	// Name of the referent; More info: http://kubernetes.io/docs/user-guide/identifiers#names
+	Name string `json:"name,omitempty"`
+	// API version of the referent
+	// +optional
+	APIVersion string `json:"apiVersion,omitempty"`
+
+	// ResolverRef allows referencing a Pipeline in a remote location
+	// like a git repo. This field is only supported when the alpha
+	// feature gate is enabled.
+	// +optional
+	ResolverRef `json:",omitempty"`
+}
+
+func (r PipelineRef) ConvertToTekton() tektonapi.PipelineRef {
+	return tektonapi.PipelineRef{
+		Name:        r.Name,
+		APIVersion:  r.APIVersion,
+		ResolverRef: r.ResolverRef.ConvertToTekton(),
+	}
+}
+
+// ResolverRef can be used to refer to a Pipeline or Task in a remote
+// location like a git repo. This feature is in beta and these fields
+// are only available when the beta feature gate is enabled.
+type ResolverRef struct {
+	// Resolver is the name of the resolver that should perform
+	// resolution of the referenced Tekton resource, such as "git".
+	// +optional
+	Resolver tektonapi.ResolverName `json:"resolver,omitempty"`
+	// Params contains the parameters used to identify the
+	// referenced Tekton resource. Example entries might include
+	// "repo" or "path" but the set of params ultimately depends on
+	// the chosen resolver.
+	// +optional
+	// +listType=atomic
+	Params []Param `json:"params,omitempty"`
+}
+
+func (r ResolverRef) ConvertToTekton() tektonapi.ResolverRef {
+
+	params := []tektonapi.Param{}
+	for _, p := range r.Params {
+		params = append(params, p.ConvertToTekton())
+	}
+	return tektonapi.ResolverRef{
+		Resolver: r.Resolver,
+		Params:   params,
+	}
+}
+
+// Param declares an ParamValues to use for the parameter called name.
+type Param struct {
+	Name  string     `json:"name"`
+	Value ParamValue `json:"value"`
+}
+
+func (r Param) ConvertToTekton() tektonapi.Param {
+	return tektonapi.Param{
+		Name:  r.Name,
+		Value: r.Value.ConvertToTekton(),
+	}
+}
+
+// ParamValue is a type that can hold a single string, string array, or string map.
+// Used in JSON unmarshalling so that a single JSON field can accept
+// either an individual string or an array of strings.
+type ParamValue struct {
+	Type      tektonapi.ParamType `json:"type"` // Represents the stored type of ParamValues.
+	StringVal string              `json:"stringVal"`
+	// +listType=atomic
+	ArrayVal  []string          `json:"arrayVal"`
+	ObjectVal map[string]string `json:"objectVal"`
+}
+
+func (r ParamValue) ConvertToTekton() tektonapi.ParamValue {
+	return tektonapi.ParamValue{
+		Type:      r.Type,
+		StringVal: r.StringVal,
+		ArrayVal:  r.ArrayVal,
+		ObjectVal: r.ObjectVal,
+	}
+}
+
+// UnmarshalJSON implements the json.Unmarshaller interface.
+func (paramValues *ParamValue) UnmarshalJSON(value []byte) error {
+	// ParamValues is used for Results Value as well, the results can be any kind of
+	// data so we need to check if it is empty.
+	if len(value) == 0 {
+		paramValues.Type = tektonapi.ParamTypeString
+		return nil
+	}
+	if value[0] == '[' {
+		// We're trying to Unmarshal to []string, but for cases like []int or other types
+		// of nested array which we don't support yet, we should continue and Unmarshal
+		// it to String. If the Type being set doesn't match what it actually should be,
+		// it will be captured by validation in reconciler.
+		// if failed to unmarshal to array, we will convert the value to string and marshal it to string
+		var a []string
+		if err := json.Unmarshal(value, &a); err == nil {
+			paramValues.Type = tektonapi.ParamTypeArray
+			paramValues.ArrayVal = a
+			return nil
+		}
+	}
+	if value[0] == '{' {
+		// if failed to unmarshal to map, we will convert the value to string and marshal it to string
+		var m map[string]string
+		if err := json.Unmarshal(value, &m); err == nil {
+			paramValues.Type = tektonapi.ParamTypeObject
+			paramValues.ObjectVal = m
+			return nil
+		}
+	}
+
+	// By default we unmarshal to string
+	paramValues.Type = tektonapi.ParamTypeString
+	if err := json.Unmarshal(value, &paramValues.StringVal); err == nil {
+		return nil
+	}
+	paramValues.StringVal = string(value)
+
+	return nil
+}
+
+// MarshalJSON implements the json.Marshaller interface.
+func (paramValues ParamValue) MarshalJSON() ([]byte, error) {
+	switch paramValues.Type {
+	case tektonapi.ParamTypeString:
+		return json.Marshal(paramValues.StringVal)
+	case tektonapi.ParamTypeArray:
+		return json.Marshal(paramValues.ArrayVal)
+	case tektonapi.ParamTypeObject:
+		return json.Marshal(paramValues.ObjectVal)
+	default:
+		return []byte{}, fmt.Errorf("impossible ParamValues.Type: %q", paramValues.Type)
+	}
+}
+
+// NewStructuredValues creates an ParamValues of type ParamTypeString or ParamTypeArray, based on
+// how many inputs are given (>1 input will create an array, not string).
+func NewStructuredValues(value string, values ...string) *ParamValue {
+	if len(values) > 0 {
+		return &ParamValue{
+			Type:     tektonapi.ParamTypeArray,
+			ArrayVal: append([]string{value}, values...),
+		}
+	}
+	return &ParamValue{
+		Type:      tektonapi.ParamTypeString,
+		StringVal: value,
+	}
 }
 
 // BuildPipelineSelectorSpec defines the desired state of BuildPipelineSelector

@@ -1945,7 +1945,7 @@ var _ = Describe("Component initial build controller", func() {
 			deleteSecret(pacSecretKey)
 		})
 
-		createBuildPipelineSelector := func(resolverRef tektonapi.ResolverRef, whenCondition buildappstudiov1alpha1.WhenCondition) {
+		createBuildPipelineSelector := func(resolverRef buildappstudiov1alpha1.ResolverRef, whenCondition buildappstudiov1alpha1.WhenCondition) {
 			selector := &buildappstudiov1alpha1.BuildPipelineSelector{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      defaultSelectorKey.Name,
@@ -1955,7 +1955,7 @@ var _ = Describe("Component initial build controller", func() {
 					Selectors: []buildappstudiov1alpha1.PipelineSelector{
 						{
 							Name:        "java",
-							PipelineRef: tektonapi.PipelineRef{ResolverRef: resolverRef},
+							PipelineRef: buildappstudiov1alpha1.PipelineRef{ResolverRef: resolverRef},
 							PipelineParams: []buildappstudiov1alpha1.PipelineParam{
 								{
 									Name:  "additional-param",
@@ -1970,12 +1970,12 @@ var _ = Describe("Component initial build controller", func() {
 			Expect(k8sClient.Create(ctx, selector)).To(Succeed())
 		}
 
-		defaultResolverRef := tektonapi.ResolverRef{
+		defaultResolverRef := buildappstudiov1alpha1.ResolverRef{
 			Resolver: "bundles",
-			Params: []tektonapi.Param{
-				{Name: "kind", Value: *tektonapi.NewStructuredValues("pipeline")},
-				{Name: "bundle", Value: *tektonapi.NewStructuredValues(defaultPipelineBundle)},
-				{Name: "name", Value: *tektonapi.NewStructuredValues("java-builder")},
+			Params: []buildappstudiov1alpha1.Param{
+				{Name: "kind", Value: *buildappstudiov1alpha1.NewStructuredValues("pipeline")},
+				{Name: "bundle", Value: *buildappstudiov1alpha1.NewStructuredValues(defaultPipelineBundle)},
+				{Name: "name", Value: *buildappstudiov1alpha1.NewStructuredValues("java-builder")},
 			},
 		}
 		nonMatchingConditions := buildappstudiov1alpha1.WhenCondition{Language: "java"}
@@ -2024,7 +2024,7 @@ var _ = Describe("Component initial build controller", func() {
 			assertBuildFail(false, "Build pipeline selector is not defined")
 		})
 
-		unsupportedResolverRef := tektonapi.ResolverRef{Resolver: "git"}
+		unsupportedResolverRef := buildappstudiov1alpha1.ResolverRef{Resolver: "git"}
 		noConditions := buildappstudiov1alpha1.WhenCondition{}
 
 		It("Initial build should fail when the matched pipelineRef uses an unsupported resolver", func() {
@@ -2037,11 +2037,11 @@ var _ = Describe("Component initial build controller", func() {
 			assertBuildFail(false, "The pipelineRef for this component (based on pipeline selectors) is not supported.")
 		})
 
-		incompleteResolverRef := tektonapi.ResolverRef{
+		incompleteResolverRef := buildappstudiov1alpha1.ResolverRef{
 			Resolver: "bundles",
-			Params: []tektonapi.Param{
-				{Name: "kind", Value: *tektonapi.NewStructuredValues("pipeline")},
-				{Name: "name", Value: *tektonapi.NewStructuredValues("java-builder")},
+			Params: []buildappstudiov1alpha1.Param{
+				{Name: "kind", Value: *buildappstudiov1alpha1.NewStructuredValues("pipeline")},
+				{Name: "name", Value: *buildappstudiov1alpha1.NewStructuredValues("java-builder")},
 			},
 		}
 

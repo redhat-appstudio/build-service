@@ -721,14 +721,14 @@ func getPipelineBundle(pipelineRef *tektonapi.PipelineRef) string {
 }
 
 // Return a pipelineRef that refers to a pipeline with the specified name in the specified bundle
-func newBundleResolverPipelineRef(bundle, name string) tektonapi.PipelineRef {
-	return tektonapi.PipelineRef{
-		ResolverRef: tektonapi.ResolverRef{
+func newBundleResolverPipelineRef(bundle, name string) buildappstudiov1alpha1.PipelineRef {
+	return buildappstudiov1alpha1.PipelineRef{
+		ResolverRef: buildappstudiov1alpha1.ResolverRef{
 			Resolver: "bundles",
-			Params: []tektonapi.Param{
-				{Name: "kind", Value: *tektonapi.NewStructuredValues("pipeline")},
-				{Name: "bundle", Value: *tektonapi.NewStructuredValues(bundle)},
-				{Name: "name", Value: *tektonapi.NewStructuredValues(name)},
+			Params: []buildappstudiov1alpha1.Param{
+				{Name: "kind", Value: *buildappstudiov1alpha1.NewStructuredValues("pipeline")},
+				{Name: "bundle", Value: *buildappstudiov1alpha1.NewStructuredValues(bundle)},
+				{Name: "name", Value: *buildappstudiov1alpha1.NewStructuredValues(name)},
 			},
 		},
 	}

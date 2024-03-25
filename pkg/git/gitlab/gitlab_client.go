@@ -28,6 +28,7 @@ import (
 
 // Allow mocking for tests
 var NewGitlabClient func(accessToken, baseUrl string) (*GitlabClient, error) = newGitlabClient
+var NewGitlabClientWithBasicAuth func(username, password, baseUrl string) (*GitlabClient, error) = newGitlabClientWithBasicAuth
 
 var _ gp.GitProviderClient = (*GitlabClient)(nil)
 
@@ -333,6 +334,17 @@ func (g *GitlabClient) GetConfiguredGitAppName() (string, string, error) {
 func newGitlabClient(accessToken, baseUrl string) (*GitlabClient, error) {
 	glc := &GitlabClient{}
 	c, err := gitlab.NewClient(accessToken, gitlab.WithBaseURL(baseUrl))
+	if err != nil {
+		return nil, err
+	}
+	glc.client = c
+
+	return glc, nil
+}
+
+func newGitlabClientWithBasicAuth(username, password, baseUrl string) (*GitlabClient, error) {
+	glc := &GitlabClient{}
+	c, err := gitlab.NewBasicAuthClient(username, password, gitlab.WithBaseURL(baseUrl))
 	if err != nil {
 		return nil, err
 	}

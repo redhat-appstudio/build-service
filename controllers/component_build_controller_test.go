@@ -361,28 +361,16 @@ var _ = Describe("Component initial build controller", func() {
 				Expect(d.AuthorEmail).ToNot(BeEmpty())
 				return "url", nil
 			}
-			isSetupPaCWebhookInvoked := false
-			SetupPaCWebhookFunc = func(repoUrl string, webhookUrl string, webhookSecret string) error {
-				isSetupPaCWebhookInvoked = true
-				Expect(webhookUrl).To(Equal(pacWebhookUrl))
-				Expect(webhookSecret).ToNot(BeEmpty())
-				Expect(repoUrl).To(Equal(SampleRepoLink + "-" + resourcePacPrepKey.Name))
-				return nil
-			}
 
-			pacSecretData := map[string]string{"github.token": "ghp_token"}
-			createSecret(pacSecretKey, pacSecretData)
+			pacSecretData := map[string]string{"password": "ghp_token"}
+			createSCMSecret(namespacePaCSecretKey, pacSecretData, corev1.SecretTypeBasicAuth, map[string]string{})
 
 			createComponentAndProcessBuildRequest(resourcePacPrepKey, BuildRequestConfigurePaCAnnotationValue)
 
 			waitSecretCreated(namespacePaCSecretKey)
-			waitSecretCreated(webhookSecretKey)
 			waitPaCRepositoryCreated(resourcePacPrepKey)
 			Eventually(func() bool {
 				return isCreatePaCPullRequestInvoked
-			}, timeout, interval).Should(BeTrue())
-			Eventually(func() bool {
-				return isSetupPaCWebhookInvoked
 			}, timeout, interval).Should(BeTrue())
 		})
 
@@ -487,8 +475,8 @@ var _ = Describe("Component initial build controller", func() {
 				return nil
 			}
 
-			pacSecretData := map[string]string{"github.token": "ghp_token"}
-			createSecret(pacSecretKey, pacSecretData)
+			pacSecretData := map[string]string{"password": "ghp_token"}
+			createSCMSecret(namespacePaCSecretKey, pacSecretData, corev1.SecretTypeBasicAuth, map[string]string{})
 
 			component1Key := resourcePacPrepKey
 			component2Key := types.NamespacedName{Name: "component2", Namespace: HASAppNamespace}
@@ -521,8 +509,8 @@ var _ = Describe("Component initial build controller", func() {
 				return nil
 			}
 
-			pacSecretData := map[string]string{"github.token": "ghp_token"}
-			createSecret(pacSecretKey, pacSecretData)
+			pacSecretData := map[string]string{"password": "ghp_token"}
+			createSCMSecret(namespacePaCSecretKey, pacSecretData, corev1.SecretTypeBasicAuth, map[string]string{})
 
 			component1Key := resourcePacPrepKey
 			component2Key := types.NamespacedName{Name: "component2", Namespace: HASAppNamespace}
@@ -1046,8 +1034,8 @@ var _ = Describe("Component initial build controller", func() {
 				return nil
 			}
 
-			pacSecretData := map[string]string{"github.token": "ghp_token"}
-			createSecret(pacSecretKey, pacSecretData)
+			pacSecretData := map[string]string{"password": "ghp_token"}
+			createSCMSecret(namespacePaCSecretKey, pacSecretData, corev1.SecretTypeBasicAuth, map[string]string{})
 
 			createComponentAndProcessBuildRequest(resourceCleanupKey, BuildRequestConfigurePaCAnnotationValue)
 			waitPaCFinalizerOnComponent(resourceCleanupKey)
@@ -1072,8 +1060,8 @@ var _ = Describe("Component initial build controller", func() {
 				return fmt.Errorf("failed to delete webhook")
 			}
 
-			pacSecretData := map[string]string{"github.token": "ghp_token"}
-			createSecret(pacSecretKey, pacSecretData)
+			pacSecretData := map[string]string{"password": "ghp_token"}
+			createSCMSecret(namespacePaCSecretKey, pacSecretData, corev1.SecretTypeBasicAuth, map[string]string{})
 
 			createComponentAndProcessBuildRequest(resourceCleanupKey, BuildRequestConfigurePaCAnnotationValue)
 			waitPaCFinalizerOnComponent(resourceCleanupKey)

@@ -30,6 +30,7 @@ import (
 
 // Allow mocking for tests
 var NewGithubClient func(accessToken string) *GithubClient = newGithubClient
+var NewGithubClientWithBasicAuth func(username, password string) *GithubClient = newGithubClientWithBasicAuth
 
 const (
 	// Allowed values are 'json' and 'form' according to the doc: https://docs.github.com/en/rest/webhooks/repos#create-a-repository-webhook
@@ -383,6 +384,19 @@ func newGithubClient(accessToken string) *GithubClient {
 	tc := oauth2.NewClient(gh.ctx, ts)
 
 	gh.client = github.NewClient(tc)
+
+	return gh
+}
+
+func newGithubClientWithBasicAuth(username, password string) *GithubClient {
+	gh := &GithubClient{}
+	gh.ctx = context.TODO()
+
+	tp := github.BasicAuthTransport{
+		Username: strings.TrimSpace(username),
+		Password: strings.TrimSpace(password),
+	}
+	gh.client = github.NewClient(tp.Client())
 
 	return gh
 }

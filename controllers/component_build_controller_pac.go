@@ -42,12 +42,12 @@ import (
 	tektonapi "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1"
 	tektonapi_v1beta1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1beta1"
 	oci "github.com/tektoncd/pipeline/pkg/remote/oci"
-	"golang.org/x/exp/slices"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/strings/slices"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
@@ -74,6 +74,10 @@ const (
 
 	appstudioWorkspaceNameLabel      = "appstudio.redhat.com/workspace_name"
 	pacCustomParamAppstudioWorkspace = "appstudio_workspace"
+
+	scmSecretMarkerLabel          = "appstudio.redhat.com/credentials"
+	scmSecretHostnameLabel        = "appstudio.redhat.com/scm.host"
+	scmSecretRepositoryAnnotation = "appstudio.redhat.com/scm.repository"
 
 	mergeRequestDescription = `
 # Pipelines as Code configuration proposal
@@ -105,12 +109,12 @@ func (r *ComponentBuildReconciler) ProvisionPaCForComponent(ctx context.Context,
 			fmt.Errorf("error detecting git provider: %w", err))
 	}
 
-	pacSecret, err := r.ensurePaCSecret(ctx, component, gitProvider)
+	pacSecret, err := r.lookupPaCSecret(ctx, component, gitProvider)
 	if err != nil {
 		return "", err
 	}
 
-	if err := validatePaCConfiguration(gitProvider, pacSecret.Data); err != nil {
+	if err := validatePaCConfiguration(gitProvider, *pacSecret); err != nil {
 		r.EventRecorder.Event(pacSecret, "Warning", "ErrorValidatingPaCSecret", err.Error())
 		// Do not reconcile, because configuration must be fixed before it is possible to proceed.
 		return "", boerrors.NewBuildOpError(boerrors.EPaCSecretInvalid,
@@ -240,7 +244,7 @@ func (r *ComponentBuildReconciler) TriggerPaCBuild(ctx context.Context, componen
 		return false, boerrors.NewBuildOpError(boerrors.EUnknownGitProvider, err)
 	}
 
-	pacSecret, err := r.ensurePaCSecret(ctx, component, gitProvider)
+	pacSecret, err := r.lookupPaCSecret(ctx, component, gitProvider)
 	if err != nil {
 		return false, err
 	}
@@ -421,8 +425,8 @@ func (r *ComponentBuildReconciler) UndoPaCProvisionForComponent(ctx context.Cont
 		return "", boerrors.NewBuildOpError(boerrors.EUnknownGitProvider, err)
 	}
 
-	pacSecret := corev1.Secret{}
-	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: buildServiceNamespaceName, Name: gitopsprepare.PipelinesAsCodeSecretName}, &pacSecret); err != nil {
+	pacSecret, err := r.lookupPaCSecret(ctx, component, gitProvider)
+	if err != nil {
 		log.Error(err, "error getting git provider credentials secret", l.Action, l.ActionView)
 		// Cannot continue without accessing git provider credentials.
 		return "", boerrors.NewBuildOpError(boerrors.EPaCSecretNotFound, err)
@@ -462,54 +466,157 @@ func (r *ComponentBuildReconciler) UndoPaCProvisionForComponent(ctx context.Cont
 	return mrUrl, nil
 }
 
-func (r *ComponentBuildReconciler) ensurePaCSecret(ctx context.Context, component *appstudiov1alpha1.Component, gitProvider string) (*corev1.Secret, error) {
-	// Expected that the secret contains token for Pipelines as Code webhook configuration,
-	// but under <git-provider>.token field. For example: github.token
-	// Also it can contain github-private-key and github-application-id
-	// in case GitHub Application is used instead of webhook.
-	pacSecret := corev1.Secret{}
-	pacSecretKey := types.NamespacedName{Namespace: component.Namespace, Name: gitopsprepare.PipelinesAsCodeSecretName}
-	if err := r.Client.Get(ctx, pacSecretKey, &pacSecret); err != nil {
-		if !errors.IsNotFound(err) {
-			r.EventRecorder.Event(&pacSecret, "Warning", "ErrorReadingPaCSecret", err.Error())
-			return nil, fmt.Errorf("failed to get Pipelines as Code secret in %s namespace: %w", component.Namespace, err)
-		}
+func (r *ComponentBuildReconciler) lookupPaCSecret(ctx context.Context, component *appstudiov1alpha1.Component, gitProvider string) (*corev1.Secret, error) {
+	log := ctrllog.FromContext(ctx)
+	sourceUrl := component.Spec.Source.GitSource.URL
 
-		// Fallback to the global configuration
-		globalPaCSecretKey := types.NamespacedName{Namespace: buildServiceNamespaceName, Name: gitopsprepare.PipelinesAsCodeSecretName}
-		if err := r.Client.Get(ctx, globalPaCSecretKey, &pacSecret); err != nil {
-			if !errors.IsNotFound(err) {
-				r.EventRecorder.Event(&pacSecret, "Warning", "ErrorReadingPaCSecret", err.Error())
-				return nil, fmt.Errorf("failed to get Pipelines as Code secret in %s namespace: %w", globalPaCSecretKey.Namespace, err)
-			}
+	schemaless, _ := strings.CutPrefix(sourceUrl, "https://")
+	componentHost, rest, _ := strings.Cut(schemaless, "/")
+	componentRepo, _ := strings.CutSuffix(rest, ".git")
 
-			r.EventRecorder.Event(&pacSecret, "Warning", "PaCSecretNotFound", err.Error())
-			// Do not trigger a new reconcile. The PaC secret must be created first.
-			return nil, boerrors.NewBuildOpError(boerrors.EPaCSecretNotFound,
-				fmt.Errorf(" Pipelines as Code secret not found in %s namespace nor in %s", pacSecretKey.Namespace, globalPaCSecretKey.Namespace))
-		}
+	log.Info("Looking for Pipelines as Code SCM secret", "host", componentHost, "repo", componentRepo)
 
-		if !gitops.IsPaCApplicationConfigured(gitProvider, pacSecret.Data) {
-			// Webhook is used. We need to reference access token in the component namespace.
-			// Copy global PaC configuration in component namespace
-			localPaCSecret := &corev1.Secret{
-				TypeMeta: pacSecret.TypeMeta,
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      pacSecretKey.Name,
-					Namespace: pacSecretKey.Namespace,
-					Labels: map[string]string{
-						PartOfLabelName: PartOfAppStudioLabelValue,
-					},
-				},
-				Data: pacSecret.Data,
-			}
-			if err := r.Client.Create(ctx, localPaCSecret); err != nil {
-				return nil, fmt.Errorf("failed to create local PaC configuration secret: %w", err)
-			}
+	secretList := &corev1.SecretList{}
+	opts := client.ListOption(&client.MatchingLabels{
+		scmSecretMarkerLabel:   "scm",
+		scmSecretHostnameLabel: componentHost,
+	})
+
+	if err := r.Client.List(ctx, secretList, client.InNamespace(component.Namespace), opts); err != nil {
+		r.EventRecorder.Event(&corev1.Secret{}, "Warning", "ErrorListingPaCSecrets", err.Error())
+		return nil, fmt.Errorf("failed to list Pipelines as Code secrets in %s namespace: %w", component.Namespace, err)
+	}
+
+	if len(secretList.Items) == 0 {
+		if gitProvider == "github" {
+			// No SCM secrets found in the component namespace, fall back to the global configuration
+			return r.lookupGHAppSecret(ctx)
+		} else {
+			return nil, boerrors.NewBuildOpError(boerrors.EPaCSecretNotFound, fmt.Errorf("no Pipelines as Code secrets found in %s namespace", component.Namespace))
 		}
 	}
 
-	return &pacSecret, nil
+	// sort secrets into two slices by their type
+	var sshSecrets, basicSecrets []corev1.Secret
+	for _, secret := range secretList.Items {
+		switch secret.Type {
+		case corev1.SecretTypeSSHAuth:
+			sshSecrets = append(sshSecrets, secret)
+		case corev1.SecretTypeBasicAuth:
+			basicSecrets = append(basicSecrets, secret)
+		default:
+			log.Error(nil, "Unknown SCM secret type meet", "type", secret.Type, "host", componentHost, "repo", componentRepo)
+		}
+	}
+	log.Info("Found SCM secrets", "ssh", len(sshSecrets), "basic", len(basicSecrets))
+
+	// find the best matching secret, starting from SSH type
+	if sshSecret := bestMatchingSecret(componentRepo, sshSecrets); sshSecret != nil {
+		return sshSecret, nil
+	}
+	if basicSecret := bestMatchingSecret(componentRepo, basicSecrets); basicSecret != nil {
+		return basicSecret, nil
+	}
+	// No SCM secrets found in the component namespace, fall back to the global configuration
+	if gitProvider == "github" {
+		return r.lookupGHAppSecret(ctx)
+	} else {
+		return nil, boerrors.NewBuildOpError(boerrors.EPaCSecretNotFound, fmt.Errorf("no matching Pipelines as Code secrets found in %s namespace", component.Namespace))
+	}
+
+}
+
+// finds the best matching secret for the given repository, considering the repository annotation match priority:
+//   - Highest priority is given to the secret with the direct repository path match to the component repository
+//   - If no direct match is found, the secret with the longest component paths intersection is returned
+//     i.e. for the org/proj/sub1 component URL, secret with org/proj/* will have a higher priority than secret with
+//     just org/* and will be returned first
+//   - If no secret with matching repository annotation is found, the one with just matching hostname label is returned
+func bestMatchingSecret(componentRepository string, secrets []corev1.Secret) *corev1.Secret {
+
+	// secrets without repository annotation
+	var hostOnlySecrets []corev1.Secret
+
+	// map of secret index and its best path intersections count, i.e. the count of path parts matched,
+	var potentialMatches = make(map[int]int, len(secrets))
+
+	for index, secret := range secrets {
+		repositoryAnnotation, exists := secret.Annotations[scmSecretRepositoryAnnotation]
+		if !exists || repositoryAnnotation == "" {
+			hostOnlySecrets = append(hostOnlySecrets, secret)
+			continue
+		}
+		secretRepositories := strings.Split(repositoryAnnotation, ",")
+
+		//trim possible slashes at the beginning of the repository path
+		for i, repository := range secretRepositories {
+			secretRepositories[i] = strings.TrimPrefix(repository, "/")
+		}
+
+		// Direct repository match, return secret
+		if slices.Contains(secretRepositories, componentRepository) {
+			return &secret
+		}
+		// No direct match, check for wildcard match, i.e. org/repo/* matches org/repo/foo, org/repo/bar, etc.
+		componentRepoParts := strings.Split(componentRepository, "/")
+
+		// Find wildcard repositories
+		wildcardRepos := slices.Filter(nil, secretRepositories, func(s string) bool { return strings.HasSuffix(s, "*") })
+
+		for _, repo := range wildcardRepos {
+			i := slicesIntersection(componentRepoParts, strings.Split(strings.TrimSuffix(repo, "*"), "/"))
+			if i > 0 && potentialMatches[index] < i {
+				// Add whole secret index to potential matches
+				potentialMatches[index] = i
+			}
+		}
+	}
+	if len(potentialMatches) == 0 {
+		if len(hostOnlySecrets) == 0 {
+			return nil // Nothing matched
+		}
+		return &hostOnlySecrets[0] // Return first host-only secret
+	}
+
+	// find the best matching secret
+	var bestIdx, bestCount int
+	for i, count := range potentialMatches {
+		if count > bestCount {
+			bestCount = count
+			bestIdx = i
+		}
+	}
+	return &secrets[bestIdx]
+}
+
+// slicesIntersection returns the number of elements intersection between two slices with respect to the order,
+// i.e. slicesIntersection(["a", "b", "c"], ["a", "b", "d"]) == 2 but slicesIntersection(["a", "b", "c"], ["b", "a", "c"]) == 0
+func slicesIntersection(s1, s2 []string) int {
+	var count int
+	for i, e1 := range s1 {
+		if i < len(s2) && e1 == s2[i] {
+			count++
+		} else {
+			break
+		}
+	}
+	return count
+}
+
+func (r *ComponentBuildReconciler) lookupGHAppSecret(ctx context.Context) (*corev1.Secret, error) {
+	pacSecret := &corev1.Secret{}
+	globalPaCSecretKey := types.NamespacedName{Namespace: buildServiceNamespaceName, Name: gitopsprepare.PipelinesAsCodeSecretName}
+	if err := r.Client.Get(ctx, globalPaCSecretKey, pacSecret); err != nil {
+		if !errors.IsNotFound(err) {
+			r.EventRecorder.Event(pacSecret, "Warning", "ErrorReadingPaCSecret", err.Error())
+			return nil, fmt.Errorf("failed to get Pipelines as Code secret in %s namespace: %w", globalPaCSecretKey.Namespace, err)
+		}
+
+		r.EventRecorder.Event(pacSecret, "Warning", "PaCSecretNotFound", err.Error())
+		// Do not trigger a new reconcile. The PaC secret must be created first.
+		return nil, boerrors.NewBuildOpError(boerrors.EPaCSecretNotFound, fmt.Errorf(" Pipelines as Code secret not found in %s ", globalPaCSecretKey.Namespace))
+	}
+	return pacSecret, nil
 }
 
 // Returns webhook secret for given component.
@@ -614,10 +721,25 @@ func (r *ComponentBuildReconciler) getPaCRoutePublicUrl(ctx context.Context) (st
 }
 
 // validatePaCConfiguration detects checks that all required fields is set for whatever method is used.
-func validatePaCConfiguration(gitProvider string, config map[string][]byte) error {
-	isApp := gitops.IsPaCApplicationConfigured(gitProvider, config)
+func validatePaCConfiguration(gitProvider string, pacSecret corev1.Secret) error {
+	isApp := gitops.IsPaCApplicationConfigured(gitProvider, pacSecret.Data)
 
 	expectedPaCWebhookConfigFields := []string{gitops.GetProviderTokenKey(gitProvider)}
+	expectedPacSSHConfigFields := []string{"ssh-privatekey"}
+	expectedPacBasicConfigFields := []string{"password"}
+
+	validateNonAppConfig := func(secret corev1.Secret) error {
+		switch secret.Type {
+		case corev1.SecretTypeOpaque:
+			return checkMandatoryFieldsNotEmpty(secret.Data, expectedPaCWebhookConfigFields)
+		case corev1.SecretTypeSSHAuth:
+			return checkMandatoryFieldsNotEmpty(secret.Data, expectedPacSSHConfigFields)
+		case corev1.SecretTypeBasicAuth:
+			return checkMandatoryFieldsNotEmpty(secret.Data, expectedPacBasicConfigFields)
+		default:
+			return fmt.Errorf(" Pipelines as Code secret: unsupported secret type: %s", pacSecret.Type)
+		}
+	}
 
 	var err error
 	switch gitProvider {
@@ -625,38 +747,37 @@ func validatePaCConfiguration(gitProvider string, config map[string][]byte) erro
 		if isApp {
 			// GitHub application
 
-			err = checkMandatoryFieldsNotEmpty(config, []string{gitops.PipelinesAsCode_githubAppIdKey, gitops.PipelinesAsCode_githubPrivateKey})
+			err = checkMandatoryFieldsNotEmpty(pacSecret.Data, []string{gitops.PipelinesAsCode_githubAppIdKey, gitops.PipelinesAsCode_githubPrivateKey})
 			if err != nil {
 				break
 			}
 
 			// validate content of the fields
-			if _, e := strconv.ParseInt(string(config[gitops.PipelinesAsCode_githubAppIdKey]), 10, 64); e != nil {
+			if _, e := strconv.ParseInt(string(pacSecret.Data[gitops.PipelinesAsCode_githubAppIdKey]), 10, 64); e != nil {
 				err = fmt.Errorf(" Pipelines as Code: failed to parse GitHub application ID. Cause: %w", e)
 				break
 			}
 
-			privateKey := strings.TrimSpace(string(config[gitops.PipelinesAsCode_githubPrivateKey]))
+			privateKey := strings.TrimSpace(string(pacSecret.Data[gitops.PipelinesAsCode_githubPrivateKey]))
 			if !strings.HasPrefix(privateKey, "-----BEGIN RSA PRIVATE KEY-----") ||
 				!strings.HasSuffix(privateKey, "-----END RSA PRIVATE KEY-----") {
 				err = fmt.Errorf(" Pipelines as Code secret: GitHub application private key is invalid")
 				break
 			}
 		} else {
-			// webhook
-			err = checkMandatoryFieldsNotEmpty(config, expectedPaCWebhookConfigFields)
+			err = validateNonAppConfig(pacSecret)
 		}
 
 	case "gitlab":
-		err = checkMandatoryFieldsNotEmpty(config, expectedPaCWebhookConfigFields)
+		err = validateNonAppConfig(pacSecret)
 
 	case "bitbucket":
-		err = checkMandatoryFieldsNotEmpty(config, []string{gitops.GetProviderTokenKey(gitProvider)})
+		err = checkMandatoryFieldsNotEmpty(pacSecret.Data, []string{gitops.GetProviderTokenKey(gitProvider)})
 		if err != nil {
 			break
 		}
 
-		if len(config["username"]) == 0 {
+		if len(pacSecret.Data["username"]) == 0 {
 			err = fmt.Errorf(" Pipelines as Code secret: name of the user field must be configured")
 		}
 

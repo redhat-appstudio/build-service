@@ -466,6 +466,40 @@ func createSecret(resourceKey types.NamespacedName, data map[string]string) {
 	}, timeout, interval).Should(Succeed())
 }
 
+func createSCMSecret(resourceKey types.NamespacedName, data map[string]string, secretType corev1.SecretType, annotations map[string]string) {
+	labels := map[string]string{
+		"appstudio.redhat.com/credentials": "scm",
+		"appstudio.redhat.com/scm.host":    "github.com",
+	}
+	secret := &corev1.Secret{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "v1",
+			Kind:       "Secret",
+		},
+		Type: secretType,
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        resourceKey.Name,
+			Namespace:   resourceKey.Namespace,
+			Labels:      labels,
+			Annotations: annotations,
+		},
+		StringData: data,
+	}
+	if err := k8sClient.Create(ctx, secret); err != nil {
+		if !k8sErrors.IsAlreadyExists(err) {
+			Fail(err.Error())
+		}
+		deleteSecret(resourceKey)
+		secret.ResourceVersion = ""
+		Expect(k8sClient.Create(ctx, secret)).Should(Succeed())
+	}
+
+	Eventually(func() error {
+		secret := &corev1.Secret{}
+		return k8sClient.Get(ctx, resourceKey, secret)
+	}, timeout, interval).Should(Succeed())
+}
+
 func deleteSecret(resourceKey types.NamespacedName) {
 	secret := &corev1.Secret{}
 	if err := k8sClient.Get(ctx, resourceKey, secret); err != nil {

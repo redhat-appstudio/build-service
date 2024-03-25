@@ -17,15 +17,14 @@ limitations under the License.
 package gitproviderfactory
 
 import (
+	"encoding/base64"
 	"fmt"
-	"strconv"
-	"strings"
-
 	"github.com/redhat-appstudio/application-service/gitops"
 	"github.com/redhat-appstudio/build-service/pkg/boerrors"
 	"github.com/redhat-appstudio/build-service/pkg/git/github"
 	"github.com/redhat-appstudio/build-service/pkg/git/gitlab"
 	"github.com/redhat-appstudio/build-service/pkg/git/gitprovider"
+	"strconv"
 )
 
 var CreateGitClient func(gitClientConfig GitClientConfig) (gitprovider.GitProviderClient, error) = createGitClient
@@ -50,28 +49,46 @@ type GitClientConfig struct {
 // createGitClient creates new git provider client for the requested config
 func createGitClient(gitClientConfig GitClientConfig) (gitprovider.GitProviderClient, error) {
 	gitProvider := gitClientConfig.GitProvider
-	config := gitClientConfig.PacSecretData
+	secretData := gitClientConfig.PacSecretData
+	username, usernameExists := secretData["username"]
+	password, passwordExists := secretData["password"]
+	_, sshKeyExists := secretData["ssh-privatekey"]
 
-	isAppUsed := gitops.IsPaCApplicationConfigured(gitProvider, config)
-	var accessToken string
-	if !isAppUsed {
-		accessToken = strings.TrimSpace(string(config[gitops.GetProviderTokenKey(gitProvider)]))
-	}
+	isAppUsed := gitops.IsPaCApplicationConfigured(gitProvider, secretData)
 
 	switch gitProvider {
 	case "github":
 		if !isAppUsed {
-			return github.NewGithubClient(accessToken), nil
+			if passwordExists {
+				password, err := base64.StdEncoding.DecodeString(string(password))
+				if err != nil {
+					return nil, fmt.Errorf("failed to decode password: %w", err)
+				}
+				if usernameExists {
+					username, err := base64.StdEncoding.DecodeString(string(username))
+					if err != nil {
+						return nil, fmt.Errorf("failed to decode username: %w", err)
+					}
+					return github.NewGithubClientWithBasicAuth(string(username), string(password)), nil
+				}
+				return github.NewGithubClient(string(password)), nil
+			}
+			if sshKeyExists {
+				return nil, boerrors.NewBuildOpError(boerrors.EGitHubSecretTypeNotSupported,
+					fmt.Errorf("failed to create git client: GitHub ssh key authentication not yet supported"))
+			}
+			return nil, boerrors.NewBuildOpError(boerrors.EGitHubSecretTypeNotSupported,
+				fmt.Errorf("failed to create git client:  unsupported secret data. Expected username/password or token"))
 		}
 
-		githubAppIdStr := string(config[gitops.PipelinesAsCode_githubAppIdKey])
+		githubAppIdStr := string(secretData[gitops.PipelinesAsCode_githubAppIdKey])
 		githubAppId, err := strconv.ParseInt(githubAppIdStr, 10, 64)
 		if err != nil {
 			return nil, boerrors.NewBuildOpError(boerrors.EGitHubAppMalformedId,
 				fmt.Errorf("failed to create git client: failed to convert %s to int: %w", githubAppIdStr, err))
 		}
 
-		privateKey := config[gitops.PipelinesAsCode_githubPrivateKey]
+		privateKey := secretData[gitops.PipelinesAsCode_githubPrivateKey]
 
 		if gitClientConfig.IsAppInstallationExpected {
 			// It's required that the configured Pipelines as Code application is installed into user's account
@@ -109,7 +126,30 @@ func createGitClient(gitClientConfig GitClientConfig) (gitprovider.GitProviderCl
 		if err != nil {
 			return nil, err
 		}
-		return gitlab.NewGitlabClient(accessToken, baseUrl)
+		if usernameExists && passwordExists {
+			username, err := base64.StdEncoding.DecodeString(string(username))
+			if err != nil {
+				return nil, fmt.Errorf("failed to decode username: %w", err)
+			}
+			password, err := base64.StdEncoding.DecodeString(string(password))
+			if err != nil {
+				return nil, fmt.Errorf("failed to decode password: %w", err)
+			}
+			return gitlab.NewGitlabClientWithBasicAuth(string(username), string(password), baseUrl)
+		}
+		if !usernameExists && passwordExists {
+			password, err := base64.StdEncoding.DecodeString(string(password))
+			if err != nil {
+				return nil, fmt.Errorf("failed to decode password: %w", err)
+			}
+			return gitlab.NewGitlabClient(string(password), baseUrl)
+		}
+		if sshKeyExists {
+			return nil, boerrors.NewBuildOpError(boerrors.EGitLabSecretTypeNotSupported,
+				fmt.Errorf("failed to create git client: GitLab ssh key authentication not yet supported"))
+		}
+		return nil, boerrors.NewBuildOpError(boerrors.EGitLabSecretTypeNotSupported,
+			fmt.Errorf("failed to create git client: unsupported secret data. Expected username/password or token"))
 
 	case "bitbucket":
 		return nil, boerrors.NewBuildOpError(boerrors.EUnknownGitProvider, fmt.Errorf("git provider %s is not supported", gitProvider))

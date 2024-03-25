@@ -121,12 +121,20 @@ const (
 	EGitHubNoResourceToOperateOn BOErrorId = 75
 	// EGitHubReachRateLimit reach the GitHub REST API rate limit.
 	EGitHubReachRateLimit BOErrorId = 76
+	// EGitHubSecretInvalid the secret with GitHub App credentials is invalid.
+	EGitHubSecretInvalid = 77
+	// EGitHubSecretTypeNotSupported the secret type with GitHub App credentials is not supported.
+	EGitHubSecretTypeNotSupported = 78
 
 	// EGitLabTokenUnauthorized access token is not recognized by GitLab and 401 is responded.
 	// The access token may be malformed or expired.
 	EGitLabTokenUnauthorized BOErrorId = 90
 	// EGitLabTokenInsufficientScope the access token does not have sufficient scope and 403 is responded.
 	EGitLabTokenInsufficientScope BOErrorId = 91
+	// EGitLabSecretInvalid the secret with GitLab credentials is invalid.
+	EGitLabSecretInvalid BOErrorId = 92
+	// EGitLabSecretTypeNotSupported the secret type with GitLab credentials is not supported.
+	EGitLabSecretTypeNotSupported BOErrorId = 93
 
 	// Value of 'image.redhat.com/image' component annotation is not a valid json or the json has invalid structure.
 	EFailedToParseImageAnnotation BOErrorId = 200

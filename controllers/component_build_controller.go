@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/redhat-appstudio/build-service/pkg/bometrics"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -33,10 +34,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
-	"github.com/prometheus/client_golang/prometheus"
 	appstudiov1alpha1 "github.com/redhat-appstudio/application-api/api/v1alpha1"
 	"github.com/redhat-appstudio/build-service/pkg/boerrors"
 	l "github.com/redhat-appstudio/build-service/pkg/logs"
@@ -70,90 +69,7 @@ const (
 
 	buildServiceNamespaceName         = "build-service"
 	buildPipelineSelectorResourceName = "build-pipeline-selector"
-
-	metricsNamespace = "redhat_appstudio"
-	metricsSubsystem = "buildservice"
 )
-
-var (
-	componentOnboardingTimeMetric                 prometheus.Histogram
-	simpleBuildPipelineCreationTimeMetric         prometheus.Histogram
-	pipelinesAsCodeComponentProvisionTimeMetric   prometheus.Histogram
-	pipelinesAsCodeComponentUnconfigureTimeMetric prometheus.Histogram
-	pushPipelineRebuildTriggerTimeMetric          prometheus.Histogram
-	componentTimesForMetrics                      = map[string]componentMetricsInfo{}
-)
-
-type componentMetricsInfo struct {
-	startTimestamp  time.Time
-	requestedAction string
-}
-
-func initMetrics() error {
-	buckets := getProvisionTimeMetricsBuckets()
-
-	componentOnboardingTimeMetric = prometheus.NewHistogram(prometheus.HistogramOpts{
-		Namespace: metricsNamespace,
-		Subsystem: metricsSubsystem,
-		Buckets:   buckets,
-		Name:      "component_onboarding_time",
-		Help:      "The time in seconds spent from the moment of Component creation till simple build pipeline submission, or PaC provision.",
-	})
-	simpleBuildPipelineCreationTimeMetric = prometheus.NewHistogram(prometheus.HistogramOpts{
-		Namespace: metricsNamespace,
-		Subsystem: metricsSubsystem,
-		Buckets:   buckets,
-		Name:      "simple_build_pipeline_creation_time",
-		Help:      "The time in seconds spent from the moment of requesting simple build for Component till build pipeline submission.",
-	})
-	pipelinesAsCodeComponentProvisionTimeMetric = prometheus.NewHistogram(prometheus.HistogramOpts{
-		Namespace: metricsNamespace,
-		Subsystem: metricsSubsystem,
-		Buckets:   buckets,
-		Name:      "PaC_configuration_time",
-		Help:      "The time in seconds spent from the moment of requesting PaC provision till Pipelines-as-Code configuration done in the Component source repository.",
-	})
-	pipelinesAsCodeComponentUnconfigureTimeMetric = prometheus.NewHistogram(prometheus.HistogramOpts{
-		Namespace: metricsNamespace,
-		Subsystem: metricsSubsystem,
-		Buckets:   buckets,
-		Name:      "PaC_unconfiguration_time",
-		Help:      "The time in seconds spent from the moment of requesting PaC unprovision till Pipelines-as-Code configuration is removed in the Component source repository.",
-	})
-	pushPipelineRebuildTriggerTimeMetric = prometheus.NewHistogram(prometheus.HistogramOpts{
-		Namespace: metricsNamespace,
-		Subsystem: metricsSubsystem,
-		Buckets:   buckets,
-		Name:      "Push_pipeline_rebuild_trigger_time",
-		Help:      "The time in seconds spent from the moment of requesting push pipeline rebuild till Pipelines-as-Code API trigger.",
-	})
-
-	if err := metrics.Registry.Register(componentOnboardingTimeMetric); err != nil {
-		return fmt.Errorf("failed to register the initial_build_or_pac_provision_creation_time metric: %w", err)
-	}
-
-	if err := metrics.Registry.Register(simpleBuildPipelineCreationTimeMetric); err != nil {
-		return fmt.Errorf("failed to register the simple_build_pipeline_creation_time metric: %w", err)
-	}
-
-	if err := metrics.Registry.Register(pipelinesAsCodeComponentProvisionTimeMetric); err != nil {
-		return fmt.Errorf("failed to register the PaC_configuration_time metric: %w", err)
-	}
-
-	if err := metrics.Registry.Register(pipelinesAsCodeComponentUnconfigureTimeMetric); err != nil {
-		return fmt.Errorf("failed to register the PaC_unconfiguration_time metric: %w", err)
-	}
-
-	if err := metrics.Registry.Register(pushPipelineRebuildTriggerTimeMetric); err != nil {
-		return fmt.Errorf("failed to register the Push_pipeline_rebuild_trigger_time metric: %w", err)
-	}
-
-	return nil
-}
-
-func getProvisionTimeMetricsBuckets() []float64 {
-	return []float64{5, 10, 15, 20, 30, 60, 120, 300}
-}
 
 type BuildStatus struct {
 	Simple *SimpleBuildStatus `json:"simple,omitempty"`
@@ -199,10 +115,6 @@ type ComponentBuildReconciler struct {
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *ComponentBuildReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	if err := initMetrics(); err != nil {
-		return err
-	}
-
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&appstudiov1alpha1.Component{}, builder.WithPredicates(predicate.Funcs{
 			CreateFunc: func(e event.CreateEvent) bool {
@@ -222,15 +134,15 @@ func (r *ComponentBuildReconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 func updateMetricsTimes(componentIdForMetrics string, requestedAction string, reconcileStartTime time.Time) {
-	componentInfo, timeRecorded := componentTimesForMetrics[componentIdForMetrics]
+	componentInfo, timeRecorded := bometrics.ComponentTimesForMetrics[componentIdForMetrics]
 
 	// first reconcile
 	if !timeRecorded {
-		componentTimesForMetrics[componentIdForMetrics] = componentMetricsInfo{startTimestamp: reconcileStartTime, requestedAction: requestedAction}
+		bometrics.ComponentTimesForMetrics[componentIdForMetrics] = bometrics.ComponentMetricsInfo{StartTimestamp: reconcileStartTime, RequestedAction: requestedAction}
 	} else {
 		// new different request
-		if componentInfo.requestedAction != requestedAction {
-			componentTimesForMetrics[componentIdForMetrics] = componentMetricsInfo{startTimestamp: reconcileStartTime, requestedAction: requestedAction}
+		if componentInfo.RequestedAction != requestedAction {
+			bometrics.ComponentTimesForMetrics[componentIdForMetrics] = bometrics.ComponentMetricsInfo{StartTimestamp: reconcileStartTime, RequestedAction: requestedAction}
 		}
 	}
 }
@@ -287,7 +199,7 @@ func (r *ComponentBuildReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	if !component.ObjectMeta.DeletionTimestamp.IsZero() {
 		// Deletion of the component is requested
 		// remove component from metrics map
-		delete(componentTimesForMetrics, componentIdForMetrics)
+		delete(bometrics.ComponentTimesForMetrics, componentIdForMetrics)
 
 		if controllerutil.ContainsFinalizer(&component, ImageRegistrySecretLinkFinalizer) {
 			pipelineSA := &corev1.ServiceAccount{}
@@ -416,9 +328,9 @@ func (r *ComponentBuildReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		} else {
 			simpleBuildStatus.BuildStartTime = time.Now().Format(time.RFC1123)
 			if initialBuild {
-				componentOnboardingTimeMetric.Observe(time.Since(componentTimesForMetrics[componentIdForMetrics].startTimestamp).Seconds())
+				bometrics.ComponentOnboardingTimeMetric.Observe(time.Since(bometrics.ComponentTimesForMetrics[componentIdForMetrics].StartTimestamp).Seconds())
 			} else {
-				simpleBuildPipelineCreationTimeMetric.Observe(time.Since(componentTimesForMetrics[componentIdForMetrics].startTimestamp).Seconds())
+				bometrics.SimpleBuildPipelineCreationTimeMetric.Observe(time.Since(bometrics.ComponentTimesForMetrics[componentIdForMetrics].StartTimestamp).Seconds())
 			}
 		}
 
@@ -460,7 +372,7 @@ func (r *ComponentBuildReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			if reconcileRequired {
 				return ctrl.Result{Requeue: true}, nil
 			}
-			pushPipelineRebuildTriggerTimeMetric.Observe(time.Since(componentTimesForMetrics[componentIdForMetrics].startTimestamp).Seconds())
+			bometrics.PushPipelineRebuildTriggerTimeMetric.Observe(time.Since(bometrics.ComponentTimesForMetrics[componentIdForMetrics].StartTimestamp).Seconds())
 		}
 
 	case BuildRequestConfigurePaCAnnotationValue:
@@ -491,11 +403,11 @@ func (r *ComponentBuildReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 			// initial PaC provision upon component creation
 			if initialBuild {
-				componentOnboardingTimeMetric.Observe(time.Since(componentTimesForMetrics[componentIdForMetrics].startTimestamp).Seconds())
+				bometrics.ComponentOnboardingTimeMetric.Observe(time.Since(bometrics.ComponentTimesForMetrics[componentIdForMetrics].StartTimestamp).Seconds())
 			} else {
 				// if PaC is up to date, don't count request
 				if mergeUrl != "" {
-					pipelinesAsCodeComponentProvisionTimeMetric.Observe(time.Since(componentTimesForMetrics[componentIdForMetrics].startTimestamp).Seconds())
+					bometrics.PipelinesAsCodeComponentProvisionTimeMetric.Observe(time.Since(bometrics.ComponentTimesForMetrics[componentIdForMetrics].StartTimestamp).Seconds())
 				}
 			}
 		}
@@ -558,7 +470,7 @@ func (r *ComponentBuildReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 			// if PaC doesn't require unprovision, don't count request
 			if mergeUrl != "" {
-				pipelinesAsCodeComponentUnconfigureTimeMetric.Observe(time.Since(componentTimesForMetrics[componentIdForMetrics].startTimestamp).Seconds())
+				bometrics.PipelinesAsCodeComponentUnconfigureTimeMetric.Observe(time.Since(bometrics.ComponentTimesForMetrics[componentIdForMetrics].StartTimestamp).Seconds())
 			}
 		}
 
@@ -593,7 +505,7 @@ func (r *ComponentBuildReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 	log.Info(fmt.Sprintf("updated component after build request: %s", requestedAction), l.Action, l.ActionUpdate)
 	// remove component from metrics map
-	delete(componentTimesForMetrics, componentIdForMetrics)
+	delete(bometrics.ComponentTimesForMetrics, componentIdForMetrics)
 
 	// Here we do some trick.
 	// The problem is that the component update triggers both: a new reconcile and operator cache update.

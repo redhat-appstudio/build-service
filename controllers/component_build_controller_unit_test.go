@@ -19,6 +19,7 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"github.com/redhat-appstudio/build-service/pkg/bometrics"
 	"reflect"
 	"strings"
 	"testing"
@@ -41,7 +42,7 @@ import (
 const ghAppPrivateKeyStub = "-----BEGIN RSA PRIVATE KEY-----_key-content_-----END RSA PRIVATE KEY-----"
 
 func TestGetProvisionTimeMetricsBuckets(t *testing.T) {
-	buckets := getProvisionTimeMetricsBuckets()
+	buckets := bometrics.HistogramBuckets
 	for i := 1; i < len(buckets); i++ {
 		if buckets[i] <= buckets[i-1] {
 			t.Errorf("Buckets must be in increasing order, but got: %v", buckets)

@@ -50,9 +50,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
+	releaseapi "github.com/konflux-ci/release-service/api/v1alpha1"
 	pacv1alpha1 "github.com/openshift-pipelines/pipelines-as-code/pkg/apis/pipelinesascode/v1alpha1"
 	appstudiov1alpha1 "github.com/redhat-appstudio/application-api/api/v1alpha1"
-	releaseapi "github.com/redhat-appstudio/release-service/api/v1alpha1"
 	tektonapi "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1"
 
 	appstudioredhatcomv1alpha1 "github.com/konflux-ci/build-service/api/v1alpha1"

@@ -998,8 +998,8 @@ github.com/redhat-appstudio/application-service/cdq-analysis v0.0.0-202403241340
 github.com/redhat-appstudio/application-service/cdq-analysis v0.0.0-20240324134056-ac595a80c5cf/go.mod h1:tX9brsCdcc5JPtEZgllVzfsmW3apPjLtd9BMcqUrcFU=
 github.com/redhat-appstudio/operator-toolkit v0.0.0-20231201124606-2087182322ae h1:98thWrMrr9YUNCVNGqkZxKfZkaWUmMC5dmkgAI7p3uY=
 github.com/redhat-appstudio/operator-toolkit v0.0.0-20231201124606-2087182322ae/go.mod h1:7cX2+4KGZLJ4Yoj+1v0iV5hkCGBzbSd9wkNJQjCdDJs=
-github.com/redhat-appstudio/release-service v0.0.0-20231213200646-9aea1dba75c0 h1:4yvI07Wt4Xjm7s9BD4g7oYYG3VSpG2+pMvWqxUM2kwk=
-github.com/redhat-appstudio/release-service v0.0.0-20231213200646-9aea1dba75c0/go.mod h1:lhbPcRSIvwyqDl4D86Eza1vnsD7cENkMD2IU6vcs1p0=
+github.com/konflux-ci/release-service v0.0.0-20231213200646-9aea1dba75c0 h1:qYUaU/UHfvYeGa4O2tQy7rhFvXy3B1AzkW4VNGb5zLQ=
+github.com/konflux-ci/release-service v0.0.0-20231213200646-9aea1dba75c0/go.mod h1:lhbPcRSIvwyqDl4D86Eza1vnsD7cENkMD2IU6vcs1p0=
 github.com/rogpeppe/fastuuid v0.0.0-20150106093220-6724a57986af/go.mod h1:XWv6SoW27p1b0cqNHllgS5HIMJraePCO15w5zCzIWYg=
 github.com/rogpeppe/fastuuid v1.2.0/go.mod h1:jVj6XXZzXRy/MSR5jhDC/2q6DgLz+nrA6LYCDYWNEvQ=
 github.com/rogpeppe/go-internal v1.3.0/go.mod h1:M8bDsm7K2OlrFYOpmOWEs/qY81heoFRclV5y23lUDJ4=

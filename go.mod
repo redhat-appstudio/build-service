@@ -38,7 +38,7 @@ require (
 require (
 	github.com/openshift-pipelines/pipelines-as-code v0.18.0
 	github.com/redhat-appstudio/application-api v0.0.0-20231026192857-89515ad2504f
-	github.com/redhat-appstudio/release-service v0.0.0-20231213200646-9aea1dba75c0
+	github.com/konflux-ci/release-service v0.0.0-20240507194006-aaf11b05c47a
 	github.com/tektoncd/pipeline v0.49.0
 )
 

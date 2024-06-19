@@ -127,7 +127,7 @@ func (r *ComponentBuildReconciler) getBuildGitInfo(ctx context.Context, componen
 		IsAppInstallationExpected: false,
 	})
 	if err != nil {
-		log.Error(err, "failed to instantiate git client")
+		log.Error(err, "failed to instantiate git Client")
 		return nil, err
 	}
 

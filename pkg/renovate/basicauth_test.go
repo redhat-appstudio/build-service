@@ -19,23 +19,23 @@ var StaticCredentialsFunc credentials.BasicAuthCredentialsProviderFunc = func(ct
 	return staticCredentials, nil
 }
 
-func TestNewTasks(t *testing.T) {
+func TestNewTargets(t *testing.T) {
 	logf.SetLogger(zap.New(zap.WriteTo(os.Stdout), zap.UseDevMode(true)))
 	tests := []struct {
 		name            string
 		credentialsFunc credentials.BasicAuthCredentialsProviderFunc
 		components      []*git.ScmComponent
-		expected        []*Task
+		expected        []*UpdateTarget
 	}{
 		{
-			name:            "No components - no tasks",
+			name:            "No components - no targets",
 			credentialsFunc: StaticCredentialsFunc,
 		},
 		{
 			name:            "Simple one component case",
 			credentialsFunc: StaticCredentialsFunc,
 			components:      []*git.ScmComponent{ignoreError(git.NewScmComponent("github", "https://github.com/umbrellacorp/devfile-sample-go-basic", "main", "devfile-sample-go-basic", "umbrellacorp-tenant")).(*git.ScmComponent)},
-			expected: []*Task{
+			expected: []*UpdateTarget{
 				NewBasicAuthTask("github", "github.com", "https://api.github.com/", staticCredentials, []*Repository{
 					{
 						Repository:   "umbrellacorp/devfile-sample-go-basic",
@@ -64,7 +64,7 @@ func TestNewTasks(t *testing.T) {
 						"devfile-sample-go-basic",
 						"umbrellacorp-tenant")).(*git.ScmComponent),
 			},
-			expected: []*Task{
+			expected: []*UpdateTarget{
 				NewBasicAuthTask("github", "github.com", "https://api.github.com/", staticCredentials, []*Repository{
 					{
 						Repository:   "umbrellacorp/devfile-sample-python-basic",
@@ -104,7 +104,7 @@ func TestNewTasks(t *testing.T) {
 						"devfile-sample-go-basic",
 						"umbrellacorp-tenant")).(*git.ScmComponent),
 			},
-			expected: []*Task{
+			expected: []*UpdateTarget{
 				NewBasicAuthTask("github", "github.com", "https://api.github.com/", staticCredentials, []*Repository{
 					{
 						Repository:   "umbrellacorp/devfile-sample-python-basic",
@@ -137,7 +137,7 @@ func TestNewTasks(t *testing.T) {
 						"devfile-sample-go-basic",
 						"umbrellacorp-tenant")).(*git.ScmComponent),
 			},
-			expected: []*Task{
+			expected: []*UpdateTarget{
 				NewBasicAuthTask("github", "github.com", "https://api.github.com/", staticCredentials, []*Repository{
 					{
 						Repository:   "umbrellacorp/devfile-sample-python-basic",
@@ -157,9 +157,9 @@ func TestNewTasks(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			//given
-			taskProvider := NewBasicAuthTaskProvider(tt.credentialsFunc)
+			TargetProvider := NewBasicAuthTargetProvider(tt.credentialsFunc)
 			//when
-			got := taskProvider.GetNewTasks(context.TODO(), tt.components)
+			got := TargetProvider.GetUpdateTargets(context.TODO(), tt.components)
 			//then
 			sort.Slice(got, func(i, j int) bool {
 				return got[i].Platform < got[j].Platform

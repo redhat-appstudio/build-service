@@ -18,8 +18,6 @@ package controllers
 
 import (
 	"context"
-	"reflect"
-
 	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -35,7 +33,6 @@ import (
 
 	. "github.com/konflux-ci/build-service/pkg/common"
 	"github.com/konflux-ci/build-service/pkg/git"
-	"github.com/konflux-ci/build-service/pkg/k8s"
 	l "github.com/konflux-ci/build-service/pkg/logs"
 	"github.com/konflux-ci/build-service/pkg/renovate"
 	corev1 "k8s.io/api/core/v1"
@@ -48,25 +45,22 @@ const (
 // GitTektonResourcesRenovater watches build pipeline ConfigMap object in order to update
 // existing .tekton directories.
 type GitTektonResourcesRenovater struct {
-	taskProviders  []renovate.TaskProvider
-	client         client.Client
-	eventRecorder  record.EventRecorder
-	jobCoordinator *renovate.JobCoordinator
+	client               client.Client
+	eventRecorder        record.EventRecorder
+	updateCoordinator    *renovate.UpdateCoordinator
+	updateTargetProvider renovate.UpdateTargetProvider
 }
 
 func NewDefaultGitTektonResourcesRenovater(client client.Client, scheme *runtime.Scheme, eventRecorder record.EventRecorder) *GitTektonResourcesRenovater {
-	return NewGitTektonResourcesRenovater(client, scheme, eventRecorder,
-		[]renovate.TaskProvider{
-			renovate.NewGithubAppRenovaterTaskProvider(k8s.NewGithubAppConfigReader(client, scheme, eventRecorder)),
-			renovate.NewBasicAuthTaskProvider(k8s.NewGitCredentialProvider(client))})
+	return NewGitTektonResourcesRenovater(client, scheme, eventRecorder, renovate.NewCompositeUpdateTargetProvider(client, scheme, eventRecorder))
 }
 
-func NewGitTektonResourcesRenovater(client client.Client, scheme *runtime.Scheme, eventRecorder record.EventRecorder, taskProviders []renovate.TaskProvider) *GitTektonResourcesRenovater {
+func NewGitTektonResourcesRenovater(client client.Client, scheme *runtime.Scheme, eventRecorder record.EventRecorder, updateTargetProvider renovate.UpdateTargetProvider) *GitTektonResourcesRenovater {
 	return &GitTektonResourcesRenovater{
-		client:         client,
-		taskProviders:  taskProviders,
-		eventRecorder:  eventRecorder,
-		jobCoordinator: renovate.NewJobCoordinator(client, scheme),
+		client:               client,
+		updateTargetProvider: updateTargetProvider,
+		eventRecorder:        eventRecorder,
+		updateCoordinator:    renovate.NewUpdateCoordinator(client, scheme),
 	}
 }
 
@@ -122,17 +116,9 @@ func (r *GitTektonResourcesRenovater) Reconcile(ctx context.Context, req ctrl.Re
 		}
 		scmComponents = append(scmComponents, scmComponent)
 	}
-	var tasks []*renovate.Task
-	for _, taskProvider := range r.taskProviders {
-		newTasks := taskProvider.GetNewTasks(ctx, scmComponents)
-		log.Info("found new tasks", "tasks", len(newTasks), "provider", reflect.TypeOf(taskProvider).String())
-		if len(newTasks) > 0 {
-			tasks = append(tasks, newTasks...)
-		}
-	}
-
-	log.V(l.DebugLevel).Info("executing renovate tasks", "tasks", len(tasks))
-	err := r.jobCoordinator.ExecuteWithLimits(ctx, tasks)
+	updateTargets := r.updateTargetProvider.GetUpdateTargets(ctx, scmComponents)
+	log.V(l.DebugLevel).Info("found renovate targets", "targets", len(updateTargets))
+	err := r.updateCoordinator.ExecuteUpdateWithLimits(ctx, renovate.UpdateTargetsToTektonDependeciesUpdate(updateTargets))
 	if err != nil {
 		log.Error(err, "failed to create a job", l.Action, l.ActionAdd)
 	}

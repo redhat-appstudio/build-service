@@ -12,15 +12,15 @@ import (
 	"github.com/konflux-ci/build-service/pkg/git/githubapp"
 )
 
-// GithubAppRenovaterTaskProvider is an implementation of TaskProvider that provides Renovate tasks for GitHub App installations.
-type GithubAppRenovaterTaskProvider struct {
+// GithubAppRenovaterTargetProvider is an implementation of UpdateTargetProvider that provides Renovate targets for GitHub App installations.
+type GithubAppRenovaterTargetProvider struct {
 	appConfigReader githubapp.ConfigReader
 }
 
-func NewGithubAppRenovaterTaskProvider(appConfigReader githubapp.ConfigReader) GithubAppRenovaterTaskProvider {
-	return GithubAppRenovaterTaskProvider{appConfigReader: appConfigReader}
+func NewGithubAppRenovaterTargetProvider(appConfigReader githubapp.ConfigReader) GithubAppRenovaterTargetProvider {
+	return GithubAppRenovaterTargetProvider{appConfigReader: appConfigReader}
 }
-func (g GithubAppRenovaterTaskProvider) GetNewTasks(ctx context.Context, components []*git.ScmComponent) []*Task {
+func (g GithubAppRenovaterTargetProvider) GetUpdateTargets(ctx context.Context, components []*git.ScmComponent) []*UpdateTarget {
 	log := ctrllog.FromContext(ctx)
 	githubAppId, privateKey, err := g.appConfigReader.GetConfig(ctx)
 	if err != nil {
@@ -37,7 +37,7 @@ func (g GithubAppRenovaterTaskProvider) GetNewTasks(ctx context.Context, compone
 	componentUrlToBranchesMap := git.ComponentUrlToBranchesMap(components)
 
 	// Match installed repositories with Components and get custom branch if defined
-	var newTasks []*Task
+	var newTargets []*UpdateTarget
 	for _, githubAppInstallation := range githubAppInstallations {
 		var repositories []*Repository
 		for _, repository := range githubAppInstallation.Repositories {
@@ -61,13 +61,13 @@ func (g GithubAppRenovaterTaskProvider) GetNewTasks(ctx context.Context, compone
 		if len(repositories) == 0 {
 			continue
 		}
-		newTasks = append(newTasks, newGithubTask(slug, githubAppInstallation.Token, repositories))
+		newTargets = append(newTargets, newGithubTask(slug, githubAppInstallation.Token, repositories))
 	}
-	return newTasks
+	return newTargets
 }
 
-func newGithubTask(slug string, token string, repositories []*Repository) *Task {
-	return &Task{
+func newGithubTask(slug string, token string, repositories []*Repository) *UpdateTarget {
+	return &UpdateTarget{
 		Platform:     "github",
 		Endpoint:     git.BuildAPIEndpoint("github").APIEndpoint("github.com"),
 		Username:     fmt.Sprintf("%s[bot]", slug),

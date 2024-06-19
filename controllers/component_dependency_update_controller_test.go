@@ -16,9 +16,12 @@ limitations under the License.
 package controllers
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
+	"time"
 
-	l "github.com/konflux-ci/build-service/pkg/logs"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -26,18 +29,17 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"knative.dev/pkg/apis"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
+
+	"github.com/konflux-ci/build-service/pkg/git"
+	l "github.com/konflux-ci/build-service/pkg/logs"
+	"github.com/konflux-ci/build-service/pkg/renovate"
 
 	applicationapi "github.com/konflux-ci/application-api/api/v1alpha1"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	tektonapi "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1"
-
-	"context"
-	"strings"
-	"time"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -50,25 +52,43 @@ const (
 	ImageDigest   = "IMAGE_DIGEST"
 )
 
-var failures = 0
-
-func failingDependencyUpdate(ctx context.Context, client client.Client, scheme *runtime.Scheme, eventRecorder record.EventRecorder, downstreamComponents []applicationapi.Component, result *BuildResult) (immediateRetry bool, err error) {
-	if failures == 0 {
-		return DefaultTestDependenciesUpdate(ctx, client, scheme, eventRecorder, downstreamComponents, result)
-	}
-	failures = failures - 1
-	return true, fmt.Errorf("failure")
+type TestComponentDependenciesUpdater struct {
+	componentDependenciesUpdater renovate.ComponentDependenciesUpdater
+	eventRecorder                record.EventRecorder
+	failures                     int
 }
 
-func DefaultTestDependenciesUpdate(ctx context.Context, client client.Client, scheme *runtime.Scheme, eventRecorder record.EventRecorder, downstreamComponents []applicationapi.Component, result *BuildResult) (immediateRetry bool, err error) {
-	log := ctrllog.FromContext(ctx)
-	for _, downstreamComponent := range downstreamComponents {
-		log.Info(fmt.Sprintf("Nudging %s due to successful build of %s", downstreamComponent.Name, result.Component.Name), l.Action, l.ActionUpdate)
-		//TODO: do we want the event? It's just for unit testing at the moment
-		eventRecorder.Event(&downstreamComponent, v1.EventTypeNormal, ComponentNudgedEventType, fmt.Sprintf("component %s.%s was nudged by successful build of %s that produces image %s:%s@%s", downstreamComponent.Namespace, downstreamComponent.Name, result.Component.Name, result.BuiltImageRepository, result.BuiltImageTag, result.Digest))
-
+func NewTestComponentDependenciesUpdater(client client.Client, scheme *runtime.Scheme, eventRecorder record.EventRecorder) *TestComponentDependenciesUpdater {
+	return &TestComponentDependenciesUpdater{
+		componentDependenciesUpdater: renovate.NewDefaultComponentDependenciesUpdater(client, scheme, eventRecorder),
+		eventRecorder:                eventRecorder,
+		failures:                     0,
 	}
-	return false, nil
+}
+
+func (t *TestComponentDependenciesUpdater) Update(ctx context.Context, components []*git.ScmComponent, buildResult *renovate.BuildResult) error {
+	if t.failures == 0 {
+		for _, downstreamComponent := range components {
+			log.Info("Nudging due to successful build",
+				"component", downstreamComponent.ComponentName(),
+				"updatedcomponent", buildResult.UpdatedComponentName,
+				l.Action, l.ActionUpdate)
+			component := &applicationapi.Component{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      downstreamComponent.ComponentName(),
+					Namespace: downstreamComponent.NamespaceName(),
+				},
+			}
+			t.eventRecorder.Event(component, v1.EventTypeNormal, ComponentNudgedEventType, fmt.Sprintf("component %s.%s was nudged by successful build of %s that produces image %s:%s@%s", downstreamComponent.NamespaceName(), downstreamComponent.ComponentName(), buildResult.UpdatedComponentName, buildResult.BuiltImageRepository, buildResult.BuiltImageTag, buildResult.Digest))
+
+		}
+		if err := t.componentDependenciesUpdater.Update(ctx, components, buildResult); err != nil {
+			return err
+		}
+		return nil
+	}
+	t.failures = t.failures - 1
+	return fmt.Errorf("failure")
 }
 
 var _ = Describe("Component nudge controller", func() {
@@ -90,7 +110,7 @@ var _ = Describe("Component nudge controller", func() {
 	})
 
 	AfterEach(func() {
-		failures = 0
+		dependenciesUpdater.failures = 0
 		componentList := applicationapi.ComponentList{}
 		err := k8sClient.List(context.TODO(), &componentList)
 		Expect(err).ToNot(HaveOccurred())
@@ -262,7 +282,7 @@ var _ = Describe("Component nudge controller", func() {
 	Context("Test nudge failure handling", func() {
 
 		It("Test single failure results in retry", func() {
-			failures = 1
+			dependenciesUpdater.failures = 1
 			createBuildPipelineRun("test-pipeline-1", UserNamespace, BaseComponent)
 			Eventually(func() bool {
 				pr := getPipelineRun("test-pipeline-1", UserNamespace)
@@ -307,7 +327,7 @@ var _ = Describe("Component nudge controller", func() {
 		})
 
 		It("Test retries exceeded", func() {
-			failures = 10
+			dependenciesUpdater.failures = 10
 			createBuildPipelineRun("test-pipeline-1", UserNamespace, BaseComponent)
 			Eventually(func() bool {
 				pr := getPipelineRun("test-pipeline-1", UserNamespace)
@@ -353,20 +373,27 @@ var _ = Describe("Component nudge controller", func() {
 		// This test mostly just makes sure the template generates sane config
 		It("test template output", func() {
 
-			component := &applicationapi.Component{}
-			component.Name = "test-component"
-			buildResult := BuildResult{
+			buildResult := &renovate.BuildResult{
 				BuiltImageRepository:     "quay.io/sdouglas/multi-component-parent-image",
 				BuiltImageTag:            "a8dce08dbdf290e5d616a83672ad3afcb4b455ef",
 				Digest:                   "sha256:716be32f12f0dd31adbab1f57e9d0b87066e03de51c89dce8ffb397fbac92314",
 				DistributionRepositories: []string{"registry.redhat.com/some-product", "registry.redhat.com/other-product"},
-				Component:                component,
+				UpdatedComponentName:     "test-component",
 			}
-			result, err := generateRenovateConfigForNudge("slug1", []renovateRepository{{Repository: "repo1", BaseBranches: []string{"main"}}}, &buildResult)
+			update := renovate.NewNudgeDependencyUpdateConfig(buildResult, "github", "https://github.com/api", "slug", "slug", []*renovate.Repository{
+				{
+					Repository:   "repo1",
+					BaseBranches: []string{"main"},
+				},
+			})
+
+			json, err := json.MarshalIndent(update, "", "   ")
+			Expect(err).ToNot(HaveOccurred())
+			result := string(json)
 			println("!" + result + "!")
 			Expect(err).Should(Succeed())
 			Expect(strings.Contains(result, `a8dce08dbdf290e5d616a83672ad3afcb4b455ef`)).Should(BeTrue())
-			registryAlias1 := `"registry.redhat.com/some-product": "quay.io/sdouglas/multi-component-parent-image",`
+			registryAlias1 := `"registry.redhat.com/some-product": "quay.io/sdouglas/multi-component-parent-image"`
 			registryAlias2 := `"registry.redhat.com/other-product": "quay.io/sdouglas/multi-component-parent-image"`
 			Expect(strings.Contains(result, registryAlias1)).Should(BeTrue())
 			Expect(strings.Contains(result, registryAlias2)).Should(BeTrue())

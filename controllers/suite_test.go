@@ -44,6 +44,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	"github.com/konflux-ci/build-service/pkg/k8s"
+	"github.com/konflux-ci/build-service/pkg/renovate"
 	"github.com/konflux-ci/build-service/pkg/webhook"
 	//+kubebuilder:scaffold:imports
 )
@@ -52,11 +53,12 @@ import (
 // http://onsi.github.io/ginkgo/ to learn more about Ginkgo.
 
 var (
-	k8sClient client.Client
-	testEnv   *envtest.Environment
-	ctx       context.Context
-	cancel    context.CancelFunc
-	log       logr.Logger
+	k8sClient           client.Client
+	testEnv             *envtest.Environment
+	ctx                 context.Context
+	cancel              context.CancelFunc
+	log                 logr.Logger
+	dependenciesUpdater *TestComponentDependenciesUpdater
 )
 
 func TestAPIs(t *testing.T) {
@@ -155,12 +157,15 @@ var _ = BeforeSuite(func() {
 
 	err = (NewDefaultGitTektonResourcesRenovater(k8sManager.GetClient(), k8sManager.GetScheme(), k8sManager.GetEventRecorderFor("GitTektonResourcesRenovater"))).SetupWithManager(k8sManager)
 	Expect(err).ToNot(HaveOccurred())
+
+	componentDependencyUpdateReconcilerEventRecorder := k8sManager.GetEventRecorderFor("ComponentDependencyUpdateReconciler")
+	dependenciesUpdater = NewTestComponentDependenciesUpdater(k8sManager.GetClient(), k8sManager.GetScheme(), componentDependencyUpdateReconcilerEventRecorder)
+
 	err = (&ComponentDependencyUpdateReconciler{
-		Client:         k8sManager.GetClient(),
-		ApiReader:      k8sManager.GetAPIReader(),
-		Scheme:         k8sManager.GetScheme(),
-		EventRecorder:  k8sManager.GetEventRecorderFor("ComponentDependencyUpdateReconciler"),
-		UpdateFunction: failingDependencyUpdate,
+		Client:                       k8sManager.GetClient(),
+		ApiReader:                    k8sManager.GetAPIReader(),
+		EventRecorder:                componentDependencyUpdateReconcilerEventRecorder,
+		ComponentDependenciesUpdater: renovate.NewDefaultComponentDependenciesUpdater(k8sManager.GetClient(), k8sManager.GetScheme(), componentDependencyUpdateReconcilerEventRecorder),
 	}).SetupWithManager(k8sManager)
 	Expect(err).ToNot(HaveOccurred())
 

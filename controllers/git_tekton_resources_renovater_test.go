@@ -101,8 +101,8 @@ var _ = Describe("Git tekton resources renovater", func() {
 		})
 
 		It("It should trigger 2 jobs", func() {
-			installedRepositories := make([][]string, 0, renovate.TasksPerJob*2)
-			for i := 0; i < renovate.TasksPerJob*2; i++ {
+			installedRepositories := make([][]string, 0, renovate.TargetsPerJob*2)
+			for i := 0; i < renovate.TargetsPerJob*2; i++ {
 				installedRepositories = append(installedRepositories, []string{
 					fmt.Sprintf("https://github/test%v/repo%v", i, 1),
 					fmt.Sprintf("https://github/test%v/repo%v", i, 2),

@@ -23,8 +23,11 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"text/template"
 	"time"
+
+	"github.com/konflux-ci/build-service/pkg/git"
+	l "github.com/konflux-ci/build-service/pkg/logs"
+	"github.com/konflux-ci/build-service/pkg/renovate"
 
 	applicationapi "github.com/konflux-ci/application-api/api/v1alpha1"
 	releaseapi "github.com/konflux-ci/release-service/api/v1alpha1"
@@ -32,7 +35,6 @@ import (
 	"golang.org/x/exp/slices"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"knative.dev/pkg/apis"
@@ -44,8 +46,6 @@ import (
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-
-	l "github.com/konflux-ci/build-service/pkg/logs"
 )
 
 const (
@@ -79,20 +79,10 @@ var delayTime = time.Second * 10
 
 // ComponentDependencyUpdateReconciler reconciles a PipelineRun object
 type ComponentDependencyUpdateReconciler struct {
-	client.Client
-	ApiReader      client.Reader
-	Scheme         *runtime.Scheme
-	EventRecorder  record.EventRecorder
-	UpdateFunction UpdateComponentDependenciesFunction
-}
-
-type BuildResult struct {
-	BuiltImageRepository     string
-	BuiltImageTag            string
-	Digest                   string
-	DistributionRepositories []string
-	FileMatches              string
-	Component                *applicationapi.Component
+	ApiReader                    client.Reader
+	Client                       client.Client
+	EventRecorder                record.EventRecorder
+	ComponentDependenciesUpdater renovate.ComponentDependenciesUpdater
 }
 
 // SetupController creates a new Integration reconciler and adds it to the Manager.
@@ -137,10 +127,6 @@ func setupControllerWithManager(manager ctrl.Manager, reconciler *ComponentDepen
 		Complete(reconciler)
 }
 
-type UpdateComponentDependenciesFunction = func(ctx context.Context, client client.Client, scheme *runtime.Scheme, eventRecorder record.EventRecorder, downstreamComponents []applicationapi.Component, result *BuildResult) (immediateRetry bool, err error)
-
-var DefaultUpdateFunction = DefaultDependenciesUpdate
-
 // +kubebuilder:rbac:groups=appstudio.redhat.com,resources=components,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=appstudio.redhat.com,resources=components/status,verbs=get;list;watch
 // +kubebuilder:rbac:groups=tekton.dev,resources=pipelineruns,verbs=get;list;watch;create;update;patch;delete;deletecollection
@@ -155,7 +141,7 @@ func (r *ComponentDependencyUpdateReconciler) Reconcile(ctx context.Context, req
 	ctx = ctrllog.IntoContext(ctx, log)
 
 	pipelineRun := &tektonapi.PipelineRun{}
-	err := r.Get(ctx, req.NamespacedName, pipelineRun)
+	err := r.Client.Get(ctx, req.NamespacedName, pipelineRun)
 	if err != nil {
 		if errors.IsNotFound(err) {
 			return ctrl.Result{}, nil
@@ -285,7 +271,7 @@ func (r *ComponentDependencyUpdateReconciler) handleCompletedBuild(ctx context.C
 	}
 	nudgeFiles := pipelineRun.Annotations[NudgeFilesAnnotationName]
 	if nudgeFiles == "" {
-		nudgeFiles = ".*Dockerfile.*, .*.yaml, .*Containerfile.*"
+		nudgeFiles = renovate.DefaultNudgeFiles
 	}
 
 	components := applicationapi.ComponentList{}
@@ -300,7 +286,7 @@ func (r *ComponentDependencyUpdateReconciler) handleCompletedBuild(ctx context.C
 	retryTime := FailureRetryTime
 	immediateRetry := false
 
-	toUpdate := []applicationapi.Component{}
+	var scmComponentsToUpdate []*git.ScmComponent
 
 	distibutionRepositories := []string{}
 	releasePlanAdmissions := releaseapi.ReleasePlanAdmissionList{}
@@ -339,23 +325,42 @@ func (r *ComponentDependencyUpdateReconciler) handleCompletedBuild(ctx context.C
 	}
 
 	for i := range components.Items {
-		comp := components.Items[i]
-		if slices.Contains(updatedComponent.Spec.BuildNudgesRef, comp.Name) {
-			toUpdate = append(toUpdate, comp)
+		component := components.Items[i]
+		if slices.Contains(updatedComponent.Spec.BuildNudgesRef, component.Name) {
+			gitProvider, err := getGitProvider(component)
+			if err != nil {
+				// component misconfiguration shouldn't prevent other components from being updated
+				// deepcopy the component to avoid implicit memory aliasing in for loop
+				r.EventRecorder.Event(component.DeepCopy(), "Warning", "ErrorComponentProviderInfo", err.Error())
+				continue
+			}
+			scmComponent, err := git.NewScmComponent(gitProvider, component.Spec.Source.GitSource.URL, component.Spec.Source.GitSource.Revision, component.Name, component.Namespace)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			scmComponentsToUpdate = append(scmComponentsToUpdate, scmComponent)
 		}
 	}
-	var nudgeErr error
-	immediateRetry, nudgeErr = r.UpdateFunction(ctx, r.Client, r.Scheme, r.EventRecorder, toUpdate, &BuildResult{BuiltImageRepository: repo, BuiltImageTag: tag, Digest: digest, Component: updatedComponent, DistributionRepositories: distibutionRepositories, FileMatches: nudgeFiles})
 
+	nudgeErr := r.ComponentDependenciesUpdater.Update(ctx, scmComponentsToUpdate,
+		&renovate.BuildResult{
+			BuiltImageRepository:      repo,
+			BuiltImageTag:             tag,
+			Digest:                    digest,
+			DistributionRepositories:  distibutionRepositories,
+			FileMatches:               nudgeFiles,
+			UpdatedComponentNamespace: updatedComponent.Namespace,
+			UpdatedComponentName:      updatedComponent.Name},
+	)
 	if nudgeErr != nil {
 
 		componentDesc := ""
 
-		for _, comp := range toUpdate {
+		for _, component := range scmComponentsToUpdate {
 			if componentDesc != "" {
 				componentDesc += ", "
 			}
-			componentDesc += comp.Namespace + "/" + comp.Name
+			componentDesc += component.NamespaceName() + "/" + component.ComponentName()
 		}
 		log.Error(nudgeErr, fmt.Sprintf("component update of components %s as a result of a build of %s failed", componentDesc, updatedComponent.Name), l.Audit, "true")
 
@@ -497,112 +502,6 @@ func GetComponentFromPipelineRun(c client.Client, ctx context.Context, pipelineR
 	}
 
 	return nil, nil
-}
-func DefaultDependenciesUpdate(ctx context.Context, client client.Client, scheme *runtime.Scheme, eventRecorder record.EventRecorder, downstreamComponents []applicationapi.Component, result *BuildResult) (immediateRetry bool, err error) {
-	log := ctrllog.FromContext(ctx)
-	log.Info(fmt.Sprintf("reading github installations for %d components", len(downstreamComponents)))
-	slug, installationsToUpdate, err := GetGithubInstallationsForComponents(ctx, client, eventRecorder, downstreamComponents)
-	if err != nil || slug == "" {
-		return false, err
-	}
-	log.Info("creating renovate job")
-	err = CreateRenovaterPipeline(ctx, client, scheme, result.Component.Namespace, installationsToUpdate, slug, true, generateRenovateConfigForNudge, result)
-
-	return false, err
-}
-
-func generateRenovateConfigForNudge(slug string, repositories []renovateRepository, context interface{}) (string, error) {
-	buildResult := context.(*BuildResult)
-
-	repositoriesData, _ := json.Marshal(repositories)
-	fileMatchParts := strings.Split(buildResult.FileMatches, ",")
-	for i := range fileMatchParts {
-		fileMatchParts[i] = strings.TrimSpace(fileMatchParts[i])
-	}
-	fileMatch, err := json.Marshal(fileMatchParts)
-	if err != nil {
-		return "", err
-	}
-	body := `
-	{{with $root := .}}
-	module.exports = {
-		platform: "github",
-		username: "{{.Slug}}[bot]",
-		gitAuthor:"{{.Slug}} <123456+{{.Slug}}[bot]@users.noreply.github.com>",
-		onboarding: false,
-		requireConfig: "ignored",
-		repositories: {{.Repositories}},
-    	enabledManagers: "regex",
-		customManagers: [
-			{
-            	"fileMatch": {{.FileMatches}},
-				"customType": "regex",
-				"datasourceTemplate": "docker",
-				"matchStrings": [
-					"{{.BuiltImageRepository}}(:.*)?@(?<currentDigest>sha256:[a-f0-9]+)"
-					{{range .DistributionRepositories}},"{{.}}(:.*)?@(?<currentDigest>sha256:[a-f0-9]+)"{{end}}
-				],
-				"currentValueTemplate": "{{.BuiltImageTag}}",
-				"depNameTemplate": "{{.BuiltImageRepository}}",
-			}
-		],
-		registryAliases: {
-			{{range $index, $repo := .DistributionRepositories}}{{if $index}},{{end}}
-				"{{$repo}}": "{{$.BuiltImageRepository}}"{{end}}
-		},
-		packageRules: [
-		  {
-			matchPackagePatterns: ["*"],
-			enabled: false
-		  },
-		  {
-		  	"matchPackageNames": ["{{.BuiltImageRepository}}", {{range .DistributionRepositories}},"{{.}}"{{end}}],
-			groupName: "Component Update {{.ComponentName}}",
-			branchName: "konflux/component-updates/{{.ComponentName}}",
-			commitMessageTopic: "{{.ComponentName}}",
-			prFooter: "To execute skipped test pipelines write comment ` + "`/ok-to-test`" + `",
-			recreateWhen: "always",
-			rebaseWhen: "behind-base-branch",
-			enabled: true,
-            followTag: "{{.BuiltImageTag}}"
-		  }
-		],
-		forkProcessing: "enabled",
-		dependencyDashboard: false
-	}
-	{{end}}
-	`
-	data := struct {
-		Slug                     string
-		ComponentName            string
-		Repositories             string
-		BuiltImageRepository     string
-		BuiltImageTag            string
-		Digest                   string
-		DistributionRepositories []string
-		FileMatches              string
-	}{
-
-		Slug:                     slug,
-		ComponentName:            buildResult.Component.Name,
-		Repositories:             string(repositoriesData),
-		BuiltImageRepository:     buildResult.BuiltImageRepository,
-		BuiltImageTag:            buildResult.BuiltImageTag,
-		Digest:                   buildResult.Digest,
-		DistributionRepositories: buildResult.DistributionRepositories,
-		FileMatches:              string(fileMatch),
-	}
-
-	tmpl, err := template.New("renovate").Parse(body)
-	if err != nil {
-		return "", err
-	}
-	build := strings.Builder{}
-	err = tmpl.Execute(&build, data)
-	if err != nil {
-		return "", err
-	}
-	return build.String(), nil
 }
 
 // See https://issues.redhat.com/browse/KFLUXBUGS-1233

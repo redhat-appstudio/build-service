@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -184,6 +183,12 @@ func (r *ComponentBuildReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, err
 	}
 
+	// Ensure pipeline service account exists
+	_, err = r.ensurePipelineServiceAccount(ctx, component.Namespace)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
 	if getContainerImageRepositoryForComponent(&component) == "" {
 		// Container image must be set. It's not possible to proceed without it.
 		log.Info("Waiting for ContainerImage to be set")
@@ -206,25 +211,8 @@ func (r *ComponentBuildReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		// remove component from metrics map
 		delete(bometrics.ComponentTimesForMetrics, componentIdForMetrics)
 
+		// can be removed in the future, just keeping it for backwards compatibility
 		if controllerutil.ContainsFinalizer(&component, ImageRegistrySecretLinkFinalizer) {
-			pipelineSA := &corev1.ServiceAccount{}
-			err := r.Client.Get(ctx, types.NamespacedName{Name: buildPipelineServiceAccountName, Namespace: req.Namespace}, pipelineSA)
-			if err != nil && !errors.IsNotFound(err) {
-				log.Error(err, fmt.Sprintf("Failed to read service account %s in namespace %s", buildPipelineServiceAccountName, req.Namespace), l.Action, l.ActionView)
-				return ctrl.Result{}, err
-			}
-			if err == nil { // If pipeline service account found, unlink the secret from it
-				if _, generatedImageRepoSecretName, err := getComponentImageRepoAndSecretNameFromImageAnnotation(&component); err == nil {
-					if _, err := r.unlinkSecretFromServiceAccount(ctx, generatedImageRepoSecretName, pipelineSA.Name, pipelineSA.Namespace); err != nil {
-						return ctrl.Result{}, err
-					}
-				}
-			}
-
-			if err := r.Client.Get(ctx, req.NamespacedName, &component); err != nil {
-				log.Error(err, "failed to get Component", l.Action, l.ActionView)
-				return ctrl.Result{}, err
-			}
 			controllerutil.RemoveFinalizer(&component, ImageRegistrySecretLinkFinalizer)
 			if err := r.Client.Update(ctx, &component); err != nil {
 				return ctrl.Result{}, err
@@ -294,43 +282,6 @@ func (r *ComponentBuildReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		r.WaitForCacheUpdate(ctx, req.NamespacedName, &component)
 
 		return ctrl.Result{}, nil
-	}
-
-	// Ensure pipeline service account exists
-	pipelineSA, err := r.ensurePipelineServiceAccount(ctx, component.Namespace)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-
-	// Link auto generated image registry secret in case of auto generated image repository is used.
-	if !controllerutil.ContainsFinalizer(&component, ImageRegistrySecretLinkFinalizer) {
-		imageRepoGenerated, imageRepoSecretName, err := getComponentImageRepoAndSecretNameFromImageAnnotation(&component)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-
-		// Check if the generated image is used
-		if imageRepoGenerated != "" && (component.Spec.ContainerImage == "" || imageRepoGenerated == getContainerImageRepository(component.Spec.ContainerImage)) {
-			_, err = r.linkSecretToServiceAccount(ctx, imageRepoSecretName, pipelineSA.Name, pipelineSA.Namespace, true)
-			if err != nil {
-				return ctrl.Result{}, err
-			}
-
-			// Ensure finalizer exists to clean up image registry secret link on component deletion
-			if component.ObjectMeta.DeletionTimestamp.IsZero() {
-				if !controllerutil.ContainsFinalizer(&component, ImageRegistrySecretLinkFinalizer) {
-					if err := r.Client.Get(ctx, req.NamespacedName, &component); err != nil {
-						log.Error(err, "failed to get Component", l.Action, l.ActionView)
-						return ctrl.Result{}, err
-					}
-					controllerutil.AddFinalizer(&component, ImageRegistrySecretLinkFinalizer)
-					if err := r.Client.Update(ctx, &component); err != nil {
-						return ctrl.Result{}, err
-					}
-					log.Info("Image registry secret service account link finalizer added", l.Action, l.ActionUpdate)
-				}
-			}
-		}
 	}
 
 	requestedAction, requestedActionExists := component.Annotations[BuildRequestAnnotationName]
